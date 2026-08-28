@@ -22,6 +22,7 @@ const server = app.listen(PORT, () => {
   console.log(`[Genizah] Listening on port ${PORT}`);
   console.log(`[Genizah] Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log(`[Genizah] Authentik SSO: ${process.env.AUTHENTIK_ENABLED === 'true' ? 'enabled' : 'disabled'}`);
+  console.log(`[Genizah] Google OAuth: ${process.env.GOOGLE_CLIENT_ID ? 'enabled' : 'disabled'}`);
 });
 
 // Graceful shutdown

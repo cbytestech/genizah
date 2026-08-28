@@ -4,6 +4,7 @@
 // GET  /api/auth/me           Current user info
 // GET  /api/auth/authentik    Redirect to Authentik
 // GET  /api/auth/callback     Authentik OAuth callback
+// GET  /api/auth/google/*     Google OAuth (separate router)
 
 const express = require('express');
 const bcrypt = require('bcryptjs');
@@ -178,11 +179,17 @@ router.get('/callback', async (req, res) => {
 
 // Auth config (tells frontend what's available)
 router.get('/config', (req, res) => {
+  const { isGoogleEnabled } = require('./google-auth');
+
   res.json({
     local: true,
     authentik: process.env.AUTHENTIK_ENABLED === 'true',
     authentikUrl: process.env.AUTHENTIK_ENABLED === 'true'
       ? '/api/auth/authentik'
+      : null,
+    google: isGoogleEnabled(),
+    googleUrl: isGoogleEnabled()
+      ? '/api/auth/google?action=login'
       : null
   });
 });

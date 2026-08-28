@@ -36,6 +36,15 @@ export async function getMe() { return apiFetch('/auth/me'); }
 export function logout() { clearToken(); window.location.href = '/login'; }
 export function isLoggedIn() { return !!getToken(); }
 
+// Google OAuth
+export function getGoogleLoginUrl() { return '/api/auth/google?action=login'; }
+export function getGoogleLinkUrl() {
+  const token = getToken();
+  return `/api/auth/google?action=link&token=${encodeURIComponent(token)}`;
+}
+export async function getGoogleStatus() { return apiFetch('/auth/google/status'); }
+export async function unlinkGoogle() { return apiFetch('/auth/google/link', { method: 'DELETE' }); }
+
 // Documents
 export async function getDocuments(params = {}) {
   const query = new URLSearchParams();

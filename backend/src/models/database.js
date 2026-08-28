@@ -162,6 +162,20 @@ function initSchema() {
     CREATE INDEX IF NOT EXISTS idx_vendor_aliases_ocr ON vendor_aliases(ocr_text);
   `);
 
+  // ── v0.5b Migration: Google OAuth columns on users ──
+  const cols = db.prepare("PRAGMA table_info(users)").all().map(c => c.name);
+  if (!cols.includes('google_sub')) {
+    db.exec(`
+      ALTER TABLE users ADD COLUMN google_sub TEXT;
+      ALTER TABLE users ADD COLUMN google_email TEXT;
+      ALTER TABLE users ADD COLUMN google_access_token TEXT;
+      ALTER TABLE users ADD COLUMN google_refresh_token TEXT;
+      ALTER TABLE users ADD COLUMN google_token_expires TEXT;
+      ALTER TABLE users ADD COLUMN google_scopes TEXT;
+    `);
+    console.log('[Genizah] Migrated users table: added Google OAuth columns');
+  }
+
   const insertOwner = db.prepare('INSERT OR IGNORE INTO owners (id, name, color, icon, sort_order) VALUES (?, ?, ?, ?, ?)');
   insertOwner.run('owner-homestead', 'Homestead', '#3ad98e', '🏠', 1);
   insertOwner.run('owner-cbt', 'CBT', '#4a9eff', '🍪', 2);

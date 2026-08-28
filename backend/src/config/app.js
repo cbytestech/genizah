@@ -15,6 +15,7 @@ function createApp() {
   app.use(express.urlencoded({ extended: true }));
 
   app.use('/api/auth', require('../routes/auth'));
+  app.use('/api/auth/google', require('../routes/google-auth'));
   app.use('/api/documents', require('../routes/documents'));
   app.use('/api/owners', require('../routes/owners'));
   app.use('/api/types', require('../routes/types'));
