@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  genizah:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    container_name: genizah
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3090:3090"
+    volumes:
+      - /opt/genizah/db:/app/data/db
+      - /opt/genizah/files:/app/data/files
+      - /opt/genizah/thumbnails:/app/data/thumbnails
+      - /opt/genizah/config:/app/data/config
+      - /opt/genizah:/app/host-source
+      - /var/run/docker.sock:/var/run/docker.sock
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3090
+    networks:
+      - genizah_net
+
+networks:
+  genizah_net:
+    driver: bridge
