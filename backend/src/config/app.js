@@ -23,6 +23,7 @@ function createApp() {
   app.use('/api/activity', require('../routes/activity'));
   app.use('/api/sync', require('../routes/sync'));
   app.use('/api/backup', require('../routes/backup'));
+  app.use('/api/gmail-scan', require('../routes/gmail-scan'));
   app.use('/api/update', require('../routes/update'));
 
   // Thumbnails: no auth (small previews, loaded by img tags)

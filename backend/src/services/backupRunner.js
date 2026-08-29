@@ -37,7 +37,7 @@ function runMigrations() {
 
     CREATE TABLE IF NOT EXISTS drive_sync (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      attachment_id TEXT NOT NULL,
+      attachment_id INTEGER NOT NULL,
       drive_file_id TEXT,
       drive_folder_id TEXT,
       last_synced_at TEXT,
@@ -81,8 +81,8 @@ async function runBackup() {
 
     // Get all attachments
     const attachments = db.prepare(`
-      SELECT id, file_path, original_filename, file_size
-      FROM documents WHERE file_path IS NOT NULL ORDER BY id
+      SELECT id, file_path, original_name, document_id
+      FROM document_attachments ORDER BY id
     `).all();
 
     console.log(`[BackupRunner] Found ${attachments.length} total attachments`);
@@ -166,7 +166,7 @@ async function runBackup() {
     // Activity log
     const summary = `Backup ${status}: ${filesSynced} synced, ${filesSkipped} unchanged, ${filesFailed} failed, DB ${dbBackedUp ? 'saved' : 'skipped'} (${formatBytes(totalBytes)})`;
     db.prepare(
-      `INSERT INTO activity_log (user_id, action, detail, created_at) VALUES ((SELECT id FROM users WHERE role = 'admin' LIMIT 1), 'backup_complete', ?, datetime('now'))`
+      `INSERT INTO activity_log (action, details, created_at) VALUES ('backup_complete', ?, datetime('now'))`
     ).run(summary);
 
     // Also update the sync_status table so the dashboard health badge works
@@ -189,7 +189,7 @@ async function runBackup() {
     `).run(filesSynced, filesFailed, filesSkipped, dbBackedUp, totalBytes, err.message, runId);
 
     db.prepare(
-      `INSERT INTO activity_log (user_id, action, detail, created_at) VALUES ((SELECT id FROM users WHERE role = 'admin' LIMIT 1), 'backup_failed', ?, datetime('now'))`
+      `INSERT INTO activity_log (action, details, created_at) VALUES ('backup_failed', ?, datetime('now'))`
     ).run(`Backup failed: ${err.message}`);
 
     return db.prepare('SELECT * FROM backup_runs WHERE id = ?').get(runId);
@@ -209,8 +209,8 @@ function getBackupStatus() {
   ).get();
 
   const pendingCount = db.prepare(`
-    SELECT COUNT(*) as count FROM documents
-    WHERE file_path IS NOT NULL AND id NOT IN (SELECT attachment_id FROM drive_sync WHERE status = 'synced')
+    SELECT COUNT(*) as count FROM document_attachments
+    WHERE id NOT IN (SELECT attachment_id FROM drive_sync WHERE status = 'synced')
   `).get();
 
   const syncedCount = db.prepare(

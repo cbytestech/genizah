@@ -1,3 +1,6 @@
+import GmailScanStatus from '../components/GmailScanStatus';
+import GmailScanHistory from '../components/GmailScanHistory';
+import GmailSenderRules from '../components/GmailSenderRules';
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';

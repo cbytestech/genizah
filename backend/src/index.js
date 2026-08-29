@@ -7,6 +7,8 @@ const { createApp } = require('./config/app');
 const { getDb, closeDb } = require('./models/database');
 const { startExpirationChecker } = require('./services/notifications');
 const { initBackupScheduler } = require('./services/backupRunner');
+const cron = require('node-cron');
+const { initGmailScanTables, runScheduledScan } = require('./services/gmailScanner');
 
 const PORT = process.env.PORT || 3090;
 
@@ -16,6 +18,9 @@ console.log('[Genizah] Database initialized');
 
 // Start the expiration checker (daily scan for expiring documents)
 startExpirationChecker();
+
+// Gmail Receipt Scanner tables
+initGmailScanTables();
 
 const app = createApp();
 
@@ -27,6 +32,12 @@ const server = app.listen(PORT, () => {
 
   // Start Google Drive backup scheduler
   initBackupScheduler();
+
+  // Gmail Receipt Scanner: every 15 min, handler gates to 7 AM - 10 PM Central
+  cron.schedule('*/15 * * * *', () => {
+    runScheduledScan().catch(e => console.error('[Cron] Gmail scan error:', e.message));
+  });
+  console.log('[Scheduler] Gmail receipt scanner active (every 15 min, 7a-10p Central)');
 });
 
 // Graceful shutdown

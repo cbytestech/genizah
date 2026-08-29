@@ -103,3 +103,14 @@ export async function uploadPatch(file) {
   return apiFetch('/update/upload', { method: 'POST', body: formData });
 }
 export async function applyPatch(extractDir) { return apiFetch('/update/apply', { method: 'POST', body: JSON.stringify({ extractDir }) }); }
+
+// Gmail Scan
+export async function getGmailScanStatus() { return apiFetch('/gmail-scan/status'); }
+export async function triggerGmailScan() { return apiFetch('/gmail-scan/trigger', { method: 'POST' }); }
+export async function getGmailScanHistory(limit = 20) { return apiFetch(`/gmail-scan/history?limit=${limit}`); }
+export async function getGmailSenderRules() { return apiFetch('/gmail-scan/rules'); }
+export async function addGmailSenderRule(sender_email, sender_name, action = 'block') {
+  return apiFetch('/gmail-scan/rules', { method: 'POST', body: JSON.stringify({ sender_email, sender_name, action }) });
+}
+export async function removeGmailSenderRule(id) { return apiFetch(`/gmail-scan/rules/${id}`, { method: 'DELETE' }); }
+export async function getGmailRecentSenders() { return apiFetch('/gmail-scan/recent-senders'); }
