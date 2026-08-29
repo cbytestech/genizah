@@ -2,6 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../hooks/useAuth';
 import { getTags, renameTag, deleteTag, getVersion, uploadPatch, applyPatch, getGoogleStatus, getGoogleLinkUrl, unlinkGoogle, getAuthConfig } from '../services/api';
+import BackupStatus from '../components/BackupStatus';
+import BackupHistory from '../components/BackupHistory';
 
 export default function SettingsPage() {
   const navigate = useNavigate();
@@ -12,6 +14,7 @@ export default function SettingsPage() {
   const [editName, setEditName] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [toast, setToast] = useState('');
+  const token = localStorage.getItem('genizah_token');
 
   // Update state
   const [version, setVersion] = useState(null);
@@ -402,6 +405,8 @@ export default function SettingsPage() {
         )}
       </div>
 
+      <BackupStatus token={token} />
+      <BackupHistory token={token} />
       {toast && <div className="toast">{toast}</div>}
     </>
   );
