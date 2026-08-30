@@ -169,6 +169,9 @@ export default function DocumentPage() {
   const currentImg = allImages[activeImage] || allImages[0];
   const isImage = currentImg?.mime_type?.startsWith('image/');
 
+  // Positive-balance types: money coming IN (show green with + prefix)
+  const isPositiveType = ['Check', 'Refund', 'Paystub'].includes(doc.type_name);
+
   return (
     <>
       <button className="btn btn-ghost" onClick={() => navigate(-1)} style={{ marginBottom: '12px' }}>← Back</button>
@@ -255,72 +258,81 @@ export default function DocumentPage() {
 
       {/* Info or edit */}
       {!editing ? (
-        <div className="card" style={{ marginTop: '16px' }}>
-          <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: '12px' }}>{doc.title}</h2>
-          <InfoRow label="Owner">
-            <span style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              {doc.owners && doc.owners.length > 0 ? doc.owners.map(o => (
-                <span key={o.id} className="owner-badge" style={{ background: `${o.color}20`, color: o.color }}>
-                  {o.icon} {o.name}
-                </span>
-              )) : (
-                <span className="owner-badge" style={{ background: `${doc.owner_color}20`, color: doc.owner_color }}>
-                  {doc.owner_icon} {doc.owner_name}
-                </span>
-              )}
-            </span>
-          </InfoRow>
-          <InfoRow label="Type">{doc.type_icon} {doc.type_name}</InfoRow>
-          <InfoRow label="Status"><span className={`status-badge status-${doc.status}`}>{doc.status}</span></InfoRow>
-          <InfoRow label="Uploaded">{formatDate(doc.submitted_at)} by {doc.uploaded_by_name}</InfoRow>
-          <InfoRow label="Document Date">{formatDate(doc.document_date)}</InfoRow>
-          {doc.expiration_date && <InfoRow label="Expires">{formatDate(doc.expiration_date)}</InfoRow>}
-          {doc.amount != null && <InfoRow label="Amount">${Number(doc.amount).toFixed(2)}</InfoRow>}
-          {doc.vendor && <InfoRow label="Vendor">{doc.vendor}</InfoRow>}
-          {doc.notes && <InfoRow label="Notes">{doc.notes}</InfoRow>}
-          {doc.tags && doc.tags.length > 0 && (
-            <InfoRow label="Tags">
-              {doc.tags.map(t => (
-                <span key={t} style={{ background: 'var(--bg-input)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.8rem', marginRight: '4px' }}>{t}</span>
-              ))}
-            </InfoRow>
-          )}
-
-          {doc.ocr_text ? (
-            <div style={{ marginTop: '12px' }}>
-              <button className="btn btn-ghost" onClick={() => setShowOcr(!showOcr)} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
-                {showOcr ? '▼' : '▶'} OCR Text ({doc.ocr_status})
-              </button>
-              {showOcr && (
-                <pre style={{ background: 'var(--bg-input)', padding: '12px', borderRadius: 'var(--radius-sm)', marginTop: '8px',
-                  fontSize: '0.78rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '300px', overflowY: 'auto' }}>
-                  {doc.ocr_text}
-                </pre>
-              )}
-            </div>
-          ) : (
-            <div style={{ marginTop: '12px' }}>
-              <button className="btn btn-ghost" style={{ fontSize: '0.8rem', padding: '4px 8px' }}
-                onClick={async () => {
-                  showToastMsg('Running OCR...');
-                  try {
-                    await ocrRescan(id);
-                    const fresh = await getDocument(id);
-                    setDoc(fresh);
-                    showToastMsg(fresh.ocr_text ? 'OCR complete!' : 'No text detected');
-                  } catch (err) { showToastMsg(err.message); }
-                }}>
-                🔍 Run OCR Scan
-              </button>
-            </div>
-          )}
-
-          <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+        <div className="card doc-detail-card" style={{ marginTop: '16px' }}>
+          {/* Edit/Delete buttons: rendered first so CSS order can move them to top on mobile */}
+          <div className="doc-actions" style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
             <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => setEditing(true)}>✏️ Edit</button>
             {!confirmDelete
               ? <button className="btn btn-danger" style={{ flex: 1 }} onClick={() => setConfirmDelete(true)}>🗑️ Delete</button>
               : <button className="btn btn-danger" style={{ flex: 1 }} onClick={handleDelete}>Confirm Delete?</button>
             }
+          </div>
+
+          <div className="doc-info-rows">
+            <h2 style={{ fontSize: '1.2rem', fontWeight: 700, marginBottom: '12px' }}>{doc.title}</h2>
+            <InfoRow label="Owner">
+              <span style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                {doc.owners && doc.owners.length > 0 ? doc.owners.map(o => (
+                  <span key={o.id} className="owner-badge" style={{ background: `${o.color}20`, color: o.color }}>
+                    {o.icon} {o.name}
+                  </span>
+                )) : (
+                  <span className="owner-badge" style={{ background: `${doc.owner_color}20`, color: doc.owner_color }}>
+                    {doc.owner_icon} {doc.owner_name}
+                  </span>
+                )}
+              </span>
+            </InfoRow>
+            <InfoRow label="Type">{doc.type_icon} {doc.type_name}</InfoRow>
+            <InfoRow label="Status"><span className={`status-badge status-${doc.status}`}>{doc.status}</span></InfoRow>
+            <InfoRow label="Uploaded">{formatDate(doc.submitted_at)} by {doc.uploaded_by_name}</InfoRow>
+            <InfoRow label="Document Date">{formatDate(doc.document_date)}</InfoRow>
+            {doc.expiration_date && <InfoRow label="Expires">{formatDate(doc.expiration_date)}</InfoRow>}
+            {doc.amount != null && (
+              <InfoRow label="Amount">
+                <span style={isPositiveType ? { color: 'var(--accent-green)', fontWeight: 600 } : {}}>
+                  {isPositiveType ? '+' : ''}${Number(doc.amount).toFixed(2)}
+                </span>
+              </InfoRow>
+            )}
+            {doc.vendor && <InfoRow label="Vendor">{doc.vendor}</InfoRow>}
+            {doc.notes && <InfoRow label="Notes">{doc.notes}</InfoRow>}
+            {doc.tags && doc.tags.length > 0 && (
+              <InfoRow label="Tags">
+                {doc.tags.map(t => (
+                  <span key={t} style={{ background: 'var(--bg-input)', padding: '2px 8px', borderRadius: '4px', fontSize: '0.8rem', marginRight: '4px' }}>{t}</span>
+                ))}
+              </InfoRow>
+            )}
+
+            {doc.ocr_text ? (
+              <div style={{ marginTop: '12px' }}>
+                <button className="btn btn-ghost" onClick={() => setShowOcr(!showOcr)} style={{ fontSize: '0.8rem', padding: '4px 8px' }}>
+                  {showOcr ? '▼' : '▶'} OCR Text ({doc.ocr_status})
+                </button>
+                {showOcr && (
+                  <pre style={{ background: 'var(--bg-input)', padding: '12px', borderRadius: 'var(--radius-sm)', marginTop: '8px',
+                    fontSize: '0.78rem', color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', maxHeight: '300px', overflowY: 'auto' }}>
+                    {doc.ocr_text}
+                  </pre>
+                )}
+              </div>
+            ) : (
+              <div style={{ marginTop: '12px' }}>
+                <button className="btn btn-ghost" style={{ fontSize: '0.8rem', padding: '4px 8px' }}
+                  onClick={async () => {
+                    showToastMsg('Running OCR...');
+                    try {
+                      await ocrRescan(id);
+                      const fresh = await getDocument(id);
+                      setDoc(fresh);
+                      showToastMsg(fresh.ocr_text ? 'OCR complete!' : 'No text detected');
+                    } catch (err) { showToastMsg(err.message); }
+                  }}>
+                  🔍 Run OCR Scan
+                </button>
+              </div>
+            )}
           </div>
         </div>
       ) : (

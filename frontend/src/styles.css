@@ -393,6 +393,15 @@ select { appearance: none; cursor: pointer; }
 .settings-tag-row { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,0.04); gap: 8px; }
 .settings-tag-row:last-child { border-bottom: none; }
 
+/* ═══ DOCUMENT DETAIL (mobile buttons above data) ═══ */
+.doc-detail-card { display: flex; flex-direction: column; }
+.doc-actions { order: -1; margin-top: 0 !important; margin-bottom: 12px; }
+.doc-info-rows { order: 1; }
+@media (min-width: 900px) {
+  .doc-actions { order: 1; margin-top: 16px !important; margin-bottom: 0; }
+  .doc-info-rows { order: 0; }
+}
+
 /* ═══ IMAGE EDITOR ═══ */
 .image-editor-overlay { position: fixed; inset: 0; z-index: 300; background: rgba(0,0,0,0.95); display: flex; flex-direction: column; }
 .image-editor-container { display: flex; flex-direction: column; height: 100%; }

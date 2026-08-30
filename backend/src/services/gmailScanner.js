@@ -53,6 +53,8 @@ const TYPE_MAP = [
   { pattern: /subscri/i, type: 'Subscription' },
   { pattern: /ship|deliver/i, type: 'Shipping' },
   { pattern: /refund|return/i, type: 'Refund' },
+  { pattern: /paystub|pay stub|pay statement|earnings statement/i, type: 'Paystub' },
+  { pattern: /direct deposit|paycheck|payroll/i, type: 'Check' },
   // Default fallback is "Receipt"
 ];
 
@@ -122,7 +124,7 @@ function initGmailScanTables() {
   const ensureType = getDb().prepare(
     'INSERT OR IGNORE INTO document_types (id, name) VALUES (?, ?)'
   );
-  ['Receipt', 'Invoice', 'Warranty', 'Manual', 'Subscription', 'Shipping', 'Refund']
+  ['Receipt', 'Invoice', 'Warranty', 'Manual', 'Subscription', 'Shipping', 'Refund', 'Check', 'Paystub']
     .forEach(t => ensureType.run(crypto.randomUUID(), t));
 
   // Ensure "gmail-scan" tag exists

@@ -203,6 +203,8 @@ function initSchema() {
   insertType.run('type-1099', '1099', '🏛️', 17);
   insertType.run('type-donation', 'Donation Receipt', '🎁', 18);
   insertType.run('type-expense', 'Business Expense', '💼', 19);
+  insertType.run('type-check', 'Check', '💵', 20);
+  insertType.run('type-paystub', 'Paystub', '💰', 21);
   insertType.run('type-other', 'Other', '📁', 99);
 
   // Auto-migrate: copy existing owner_id into document_owners junction table

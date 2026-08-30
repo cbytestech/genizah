@@ -45,14 +45,49 @@ export default function TagInput({ value, onChange }) {
     inputRef.current?.focus();
   }
 
+  // Add multiple tags at once (from comma-split input)
+  function addMultipleTags(names, currentTags) {
+    let updated = [...currentTags];
+    for (const raw of names) {
+      const trimmed = raw.trim().toLowerCase();
+      if (trimmed && !updated.includes(trimmed)) {
+        updated.push(trimmed);
+      }
+    }
+    return updated;
+  }
+
   function removeTag(tagName) {
     updateParent(selectedTags.filter(t => t !== tagName));
   }
 
   function handleInputChange(e) {
     const val = e.target.value;
-    setInputVal(val);
 
+    // Mobile keyboards insert the comma character directly into the value
+    // instead of firing a keyDown event, so we split on commas here
+    if (val.includes(',')) {
+      const parts = val.split(',');
+      // Everything except the last segment becomes a tag immediately
+      const tagsToAdd = parts.slice(0, -1);
+      const remainder = parts[parts.length - 1];
+
+      if (tagsToAdd.length > 0) {
+        const updated = addMultipleTags(tagsToAdd, selectedTags);
+        updateParent(updated);
+      }
+
+      // Keep whatever is after the last comma as the ongoing input
+      setInputVal(remainder);
+      updateSuggestions(remainder);
+      return;
+    }
+
+    setInputVal(val);
+    updateSuggestions(val);
+  }
+
+  function updateSuggestions(val) {
     if (val.trim()) {
       const filtered = allTags.filter(t =>
         t.toLowerCase().includes(val.toLowerCase()) &&
@@ -88,6 +123,20 @@ export default function TagInput({ value, onChange }) {
     }
   }
 
+  // When the input loses focus, commit any remaining text as a tag
+  function handleBlur() {
+    if (inputVal.trim()) {
+      // Small delay so suggestion clicks can fire first
+      setTimeout(() => {
+        if (inputVal.trim()) {
+          addTag(inputVal);
+        }
+      }, 150);
+    }
+    // Hide suggestions after a short delay (let click events fire)
+    setTimeout(() => setShowSuggestions(false), 200);
+  }
+
   return (
     <div ref={wrapperRef} style={{ position: 'relative' }}>
       <div className="tag-input-wrapper" onClick={() => inputRef.current?.focus()}>
@@ -104,9 +153,13 @@ export default function TagInput({ value, onChange }) {
           value={inputVal}
           onChange={handleInputChange}
           onKeyDown={handleKeyDown}
+          onBlur={handleBlur}
           onFocus={() => { if (inputVal.trim() && suggestions.length) setShowSuggestions(true); }}
           placeholder={selectedTags.length === 0 ? 'Type to add tags...' : ''}
           className="tag-input-field"
+          enterKeyHint="done"
+          autoCapitalize="none"
+          autoCorrect="off"
         />
       </div>
       {showSuggestions && (
