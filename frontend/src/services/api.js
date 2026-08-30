@@ -107,6 +107,7 @@ export async function applyPatch(extractDir) { return apiFetch('/update/apply', 
 // Gmail Scan
 export async function getGmailScanStatus() { return apiFetch('/gmail-scan/status'); }
 export async function triggerGmailScan() { return apiFetch('/gmail-scan/trigger', { method: 'POST' }); }
+export async function triggerGmailRescan() { return apiFetch('/gmail-scan/rescan', { method: 'POST' }); }
 export async function getGmailScanHistory(limit = 20) { return apiFetch(`/gmail-scan/history?limit=${limit}`); }
 export async function getGmailSenderRules() { return apiFetch('/gmail-scan/rules'); }
 export async function addGmailSenderRule(sender_email, sender_name, action = 'block') {

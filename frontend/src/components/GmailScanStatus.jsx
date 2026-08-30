@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
-import { getGmailScanStatus, triggerGmailScan } from '../services/api';
+import { getGmailScanStatus, triggerGmailScan, triggerGmailRescan } from '../services/api';
 
 export default function GmailScanStatus() {
   const [status, setStatus] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
+  const [confirmRescan, setConfirmRescan] = useState(false);
   const [error, setError] = useState(null);
 
   const fetchStatus = useCallback(async () => {
@@ -34,6 +35,19 @@ export default function GmailScanStatus() {
       setTimeout(fetchStatus, 2000);
     } catch (e) {
       setError(e.message || 'Failed to start scan');
+      setScanning(false);
+    }
+  };
+
+  const handleRescan = async () => {
+    try {
+      setScanning(true);
+      setConfirmRescan(false);
+      setError(null);
+      await triggerGmailRescan();
+      setTimeout(fetchStatus, 2000);
+    } catch (e) {
+      setError(e.message || 'Failed to start rescan');
       setScanning(false);
     }
   };
@@ -130,6 +144,56 @@ export default function GmailScanStatus() {
       >
         {scanning ? '⟳ Scanning Gmail...' : '🔍 Scan Now (Last 7 Days)'}
       </button>
+
+      {/* Rescan: clears tracking so emails get re-processed */}
+      {!scanning && (
+        <div style={{ marginTop: '8px', textAlign: 'center' }}>
+          {confirmRescan ? (
+            <div style={{
+              background: 'var(--bg-secondary, #1e1e1e)', borderRadius: '8px',
+              padding: '10px 14px', fontSize: '13px',
+            }}>
+              <p style={{ color: 'var(--text-secondary, #ccc)', margin: '0 0 8px' }}>
+                This clears the scan history and re-processes all emails from the last 7 days.
+                Duplicates of existing documents may be created.
+              </p>
+              <div style={{ display: 'flex', gap: '8px', justifyContent: 'center' }}>
+                <button
+                  onClick={handleRescan}
+                  style={{
+                    padding: '6px 16px', background: '#e67e22',
+                    color: '#fff', border: 'none', borderRadius: '6px',
+                    fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                  }}
+                >
+                  Yes, Rescan
+                </button>
+                <button
+                  onClick={() => setConfirmRescan(false)}
+                  style={{
+                    padding: '6px 16px', background: 'transparent',
+                    color: 'var(--text-secondary, #aaa)', border: '1px solid var(--border, #444)',
+                    borderRadius: '6px', fontSize: '13px', cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setConfirmRescan(true)}
+              style={{
+                background: 'none', border: 'none',
+                color: 'var(--text-secondary, #777)',
+                cursor: 'pointer', fontSize: '12px',
+              }}
+            >
+              🔄 Full Rescan (clears tracking, re-processes all)
+            </button>
+          )}
+        </div>
+      )}
 
       <p style={{
         fontSize: '12px', color: 'var(--text-secondary, #777)',

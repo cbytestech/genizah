@@ -19,7 +19,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { getDb } = require('../models/database');
-const { processOCR } = require('./ocr');
+const { extractText } = require('./ocr');
 const { generateThumbnail } = require('./thumbnails');
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -28,15 +28,22 @@ const UPLOAD_PATH = process.env.UPLOAD_PATH || '/app/data/files';
 const THUMBNAIL_PATH = process.env.THUMBNAIL_PATH || '/app/data/thumbnails';
 
 // Gmail search query: targeted keywords to find receipts without pulling garbage
+// We intentionally avoid category:purchases (too broad, catches tracking/status emails)
 const SEARCH_KEYWORDS = [
   'receipt', 'invoice', 'order confirmation', 'order shipped',
+  'order delivered',
   'payment received', 'payment confirmation', 'purchase confirmation',
   'shipping confirmation', 'delivery confirmation', 'warranty',
   'billing statement', 'transaction receipt', 'subscription confirmation',
-  'renewal confirmation', 'refund', 'return confirmation'
+  'renewal confirmation', 'refund', 'return confirmation',
+  'your order', 'your purchase', 'thanks for your order',
+  'delivery order', 'thanks for your',
+  'you spent', 'transaction complete', 'payment successful',
+  'Delivered:', 'Confirmation'
 ].map(k => `"${k}"`).join(' OR ');
 
-const DEFAULT_QUERY = `subject:(${SEARCH_KEYWORDS}) -is:spam -is:trash -is:draft`;
+// Subject-only matching keeps it targeted; -in:sent excludes user's own forwards
+const DEFAULT_QUERY = `subject:(${SEARCH_KEYWORDS}) -is:spam -is:trash -is:draft -in:sent`;
 
 // Map subject keywords to Genizah document types
 const TYPE_MAP = [
@@ -233,14 +240,217 @@ function stripHtml(html) {
     .replace(/<\/td>/gi, '  ')
     .replace(/<\/th>/gi, '  ')
     .replace(/<[^>]*>/g, '')
+    // Named HTML entities
     .replace(/&nbsp;/gi, ' ')
     .replace(/&amp;/gi, '&')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')
     .replace(/&quot;/gi, '"')
     .replace(/&#39;/gi, "'")
-    .replace(/\n{3,}/g, '\n\n')
+    .replace(/&copy;/gi, '©')
+    .replace(/&reg;/gi, '®')
+    .replace(/&trade;/gi, '™')
+    // Zero-width and invisible characters (the garbage)
+    .replace(/&zwnj;/gi, '')
+    .replace(/&zwj;/gi, '')
+    .replace(/&lrm;/gi, '')
+    .replace(/&rlm;/gi, '')
+    .replace(/&#8202;/g, '')   // hair space
+    .replace(/&#8203;/g, '')   // zero-width space
+    .replace(/&#8204;/g, '')   // zero-width non-joiner
+    .replace(/&#8205;/g, '')   // zero-width joiner
+    .replace(/&#65279;/g, '')  // BOM
+    .replace(/&#x200B;/gi, '') // zero-width space (hex)
+    .replace(/&#x200C;/gi, '') // zero-width non-joiner (hex)
+    .replace(/&#x200D;/gi, '') // zero-width joiner (hex)
+    .replace(/&#\d+;/g, '')    // catch remaining numeric entities
+    // Clean up whitespace
+    .replace(/[ \t]+/g, ' ')          // collapse horizontal whitespace
+    .replace(/^ +| +$/gm, '')         // trim each line
+    .replace(/\n{3,}/g, '\n\n')       // max 2 consecutive newlines
+    .replace(/^\s*\n/gm, '')          // remove blank lines
     .trim();
+}
+
+// ── JSON-LD Schema.org Parsing ──────────────────────────────────────────
+// Many retailers (Walmart, Amazon, Target, Home Depot) embed structured
+// order data as JSON-LD in their emails. This gives us clean machine-readable
+// fields instead of scraping garbled HTML text.
+
+// Extract raw HTML from email parts (separate from text extraction)
+function extractRawHtml(payload) {
+  if (!payload) return null;
+  if (payload.mimeType === 'text/html' && payload.body && payload.body.data) {
+    return Buffer.from(payload.body.data, 'base64url').toString('utf-8');
+  }
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      if (part.mimeType === 'text/html' && part.body && part.body.data) {
+        return Buffer.from(part.body.data, 'base64url').toString('utf-8');
+      }
+      const result = extractRawHtml(part);
+      if (result) return result;
+    }
+  }
+  return null;
+}
+
+// Find and parse all JSON-LD blocks from HTML
+function extractJsonLd(html) {
+  if (!html) return null;
+  const regex = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
+  const results = [];
+  let match;
+  while ((match = regex.exec(html)) !== null) {
+    try {
+      const data = JSON.parse(match[1].trim());
+      // Could be a single object or an array
+      if (Array.isArray(data)) results.push(...data);
+      else results.push(data);
+    } catch (e) {
+      // Malformed JSON-LD, skip
+    }
+  }
+  return results.length > 0 ? results : null;
+}
+
+// Extract order/invoice data from JSON-LD schema.org objects
+function parseSchemaData(jsonLdArray) {
+  // Flatten @graph if present
+  const flat = [];
+  for (const item of jsonLdArray) {
+    if (item['@graph']) flat.push(...item['@graph']);
+    else flat.push(item);
+  }
+
+  // Look for Order, Invoice, or EmailMessage with order action
+  for (const obj of flat) {
+    const type = obj['@type'];
+    if (type === 'Order' || type === 'Invoice') {
+      return parseOrderSchema(obj);
+    }
+    // Some emails wrap order in an EmailMessage
+    if (type === 'EmailMessage' && obj.about && obj.about['@type'] === 'Order') {
+      return parseOrderSchema(obj.about);
+    }
+  }
+
+  // Check for potentialAction with ViewAction on an Order
+  for (const obj of flat) {
+    if (obj.potentialAction) {
+      const actions = Array.isArray(obj.potentialAction) ? obj.potentialAction : [obj.potentialAction];
+      for (const action of actions) {
+        if (action.target && action['@type'] === 'ViewAction' && obj.description) {
+          // Some retailers only embed minimal schema with a view link
+          return { vendor: obj.sender?.name || null, description: obj.description, minimal: true };
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+// Parse a schema.org Order object into clean fields
+function parseOrderSchema(order) {
+  const result = {
+    orderNumber: order.orderNumber || null,
+    vendor: null,
+    amount: null,
+    date: null,
+    status: null,
+    items: [],
+    currency: order.priceCurrency || 'USD',
+    minimal: false,
+  };
+
+  // Merchant/seller name
+  if (order.merchant) result.vendor = order.merchant.name || (typeof order.merchant === 'string' ? order.merchant : null);
+  if (!result.vendor && order.seller) result.vendor = order.seller.name || (typeof order.seller === 'string' ? order.seller : null);
+  if (!result.vendor && order.broker) result.vendor = order.broker.name || null;
+
+  // Total price
+  if (order.price != null) result.amount = parseFloat(order.price);
+  if (!result.amount && order.totalPaymentDue) {
+    result.amount = parseFloat(order.totalPaymentDue.value || order.totalPaymentDue.price || order.totalPaymentDue);
+  }
+  if (!result.amount && order.partOfInvoice) {
+    result.amount = parseFloat(order.partOfInvoice.totalPaymentDue?.value || order.partOfInvoice.totalPaymentDue?.price || 0);
+  }
+
+  // Order date
+  if (order.orderDate) result.date = order.orderDate.split('T')[0];
+
+  // Status (strip schema.org URL prefix)
+  if (order.orderStatus) {
+    result.status = String(order.orderStatus)
+      .replace(/https?:\/\/schema\.org\//i, '')
+      .replace('OrderStatus/', '')
+      .replace('Order', '');
+  }
+
+  // Items from acceptedOffer
+  if (order.acceptedOffer) {
+    const offers = Array.isArray(order.acceptedOffer) ? order.acceptedOffer : [order.acceptedOffer];
+    for (const offer of offers) {
+      const item = {
+        name: offer.itemOffered?.name || offer.itemOffered || null,
+        price: offer.price != null ? parseFloat(offer.price) : null,
+        quantity: offer.eligibleQuantity?.value || offer.quantity || 1,
+      };
+      if (item.name) result.items.push(item);
+    }
+  }
+
+  // Items from orderedItem
+  if (order.orderedItem) {
+    const ordered = Array.isArray(order.orderedItem) ? order.orderedItem : [order.orderedItem];
+    for (const oi of ordered) {
+      const item = {
+        name: oi.name || oi.orderedItem?.name || null,
+        price: oi.orderItemPrice?.price != null ? parseFloat(oi.orderItemPrice.price) : (oi.price != null ? parseFloat(oi.price) : null),
+        quantity: oi.orderQuantity || 1,
+      };
+      if (item.name) result.items.push(item);
+    }
+  }
+
+  return result;
+}
+
+// Format clean notes from schema.org order data
+function formatSchemaOrder(data, from, emailDate, subject) {
+  const lines = [];
+
+  // Header
+  const title = data.vendor || 'Order';
+  lines.push(`📧 ${title}${data.orderNumber ? ' #' + data.orderNumber : ''}`);
+  lines.push(`From: ${from}`);
+  lines.push(`Date: ${data.date || new Date(emailDate).toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}`);
+  if (data.status) lines.push(`Status: ${data.status}`);
+  if (subject) lines.push(`Subject: ${subject}`);
+  lines.push('---');
+
+  // Items list
+  if (data.items.length > 0) {
+    lines.push('');
+    lines.push('Items:');
+    for (const item of data.items) {
+      const parts = [];
+      if (item.quantity > 1) parts.push(`${item.quantity}x`);
+      parts.push(item.name || 'Unknown item');
+      if (item.price != null) parts.push(`$${item.price.toFixed(2)}`);
+      lines.push(`  ${parts.join('  ')}`);
+    }
+  }
+
+  // Total
+  if (data.amount != null) {
+    lines.push('');
+    lines.push(`Total: $${data.amount.toFixed(2)}`);
+  }
+
+  return lines.join('\n');
 }
 
 // Find attachments in message parts (recursive)
@@ -275,20 +485,41 @@ function parseReceiptFields(text) {
 
   const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
 
-  // Amount: look for labeled totals first, then any dollar amount
-  const totalPatterns = [
-    /(?:total|amount|charged|paid|payment|subtotal|grand total)[:\s]*\$?\s*([\d,]+\.\d{2})/i,
-    /\$\s*([\d,]+\.\d{2})/,
-  ];
-  for (const pat of totalPatterns) {
+  // Amount parsing: find "Total" (not Subtotal), then fallback to largest amount
+  // Step 1: Look for lines with "total" but NOT "subtotal"
+  for (const line of lines) {
+    if (/subtotal/i.test(line)) continue;
+    const m = line.match(/total[:\s]*\$?\s*([\d,]+\.\d{2})/i);
+    if (m) {
+      result.amount = parseFloat(m[1].replace(/,/g, ''));
+      break;
+    }
+  }
+
+  // Step 2: Look for labeled amounts (amount due, charged, paid)
+  if (!result.amount) {
     for (const line of lines) {
-      const m = line.match(pat);
+      const m = line.match(/(?:amount due|amount charged|charged|you paid|payment of)[:\s]*\$?\s*([\d,]+\.\d{2})/i);
       if (m) {
         result.amount = parseFloat(m[1].replace(/,/g, ''));
         break;
       }
     }
-    if (result.amount) break;
+  }
+
+  // Step 3: Fallback - collect all dollar amounts, pick the largest
+  if (!result.amount) {
+    const allAmounts = [];
+    for (const line of lines) {
+      const matches = line.matchAll(/\$\s*([\d,]+\.\d{2})/g);
+      for (const m of matches) {
+        const val = parseFloat(m[1].replace(/,/g, ''));
+        if (val > 0) allAmounts.push(val);
+      }
+    }
+    if (allAmounts.length > 0) {
+      result.amount = Math.max(...allAmounts);
+    }
   }
 
   // Date: look for common date formats
@@ -333,6 +564,18 @@ function isSenderBlocked(userId, senderEmail) {
   return rule && rule.action === 'block';
 }
 
+// ── Vendor Name Normalization ────────────────────────────────────────────
+// Strip ".com" etc. so "Walmart.com" becomes "Walmart",
+// matching manually scanned in-store receipts.
+
+function normalizeVendor(name) {
+  if (!name) return name;
+  return name
+    .replace(/\.(com|net|org|co|io|us|biz)$/i, '')  // strip TLDs
+    .replace(/^(www\.)/i, '')                         // strip www.
+    .trim();
+}
+
 // ── Owner Resolution ────────────────────────────────────────────────────
 // document_owners links to owners table (Norm, Emily, etc.), not users.
 // Match user's display_name to owners.name.
@@ -361,12 +604,32 @@ async function processMessage(gmail, user, messageId) {
   });
 
   const headers = msg.data.payload.headers || [];
-  const subject = getHeader(headers, 'Subject') || '(no subject)';
+  let subject = getHeader(headers, 'Subject') || '(no subject)';
   const from = getHeader(headers, 'From') || '';
   const dateHeader = getHeader(headers, 'Date') || '';
   const senderEmail = extractSenderEmail(from);
   const senderName = extractSenderName(from);
   const emailDate = dateHeader ? new Date(dateHeader).toISOString() : new Date().toISOString();
+
+  // Strip Fw:/Fwd:/Re: prefixes (forwarded emails are duplicates)
+  subject = subject.replace(/^(fw|fwd|re):\s*/gi, '').trim();
+
+  // Content-based dedup: if we already have a doc with the same subject (after Fw/Re strip)
+  // from the same sender ON THE SAME DAY, skip it (catches forwarded copies)
+  // Different days = different orders (recurring Marco's, Walmart subscriptions)
+  const emailDay = emailDate.split('T')[0]; // just the date portion
+  const contentDup = getDb().prepare(`
+    SELECT id FROM gmail_processed
+    WHERE user_id = ? AND sender = ? AND subject = ?
+      AND DATE(email_date) = ? AND status = 'processed'
+  `).get(user.id, senderEmail, subject, emailDay);
+  if (contentDup) {
+    getDb().prepare(`
+      INSERT INTO gmail_processed (user_id, message_id, thread_id, subject, sender, email_date, status, skip_reason)
+      VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'duplicate content (Fw/Re)')
+    `).run(user.id, messageId, msg.data.threadId, subject, senderEmail, emailDate);
+    return { status: 'duplicate' };
+  }
 
   // Check sender blacklist
   if (isSenderBlocked(user.id, senderEmail)) {
@@ -375,6 +638,22 @@ async function processMessage(gmail, user, messageId) {
       VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'blocked sender')
     `).run(user.id, messageId, msg.data.threadId, subject, senderEmail, emailDate);
     return { status: 'blocked' };
+  }
+
+  // Skip obvious tracking/status update emails that aren't actual receipts
+  const subjectLower = subject.toLowerCase();
+  const SKIP_SUBJECTS = [
+    'baking', 'constructing', 'on the way', 'out for delivery',
+    'should arrive by', 'review your recent', 'review your order updates',
+    'econfirm', 'rate your', 'how was your', 'leave a review',
+    'track your', 'is on its way', 'delivered:',
+  ];
+  if (SKIP_SUBJECTS.some(s => subjectLower.includes(s))) {
+    getDb().prepare(`
+      INSERT INTO gmail_processed (user_id, message_id, thread_id, subject, sender, email_date, status, skip_reason)
+      VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'tracking/status email')
+    `).run(user.id, messageId, msg.data.threadId, subject, senderEmail, emailDate);
+    return { status: 'skipped', reason: 'tracking/status email' };
   }
 
   // Find attachments and body text
@@ -398,30 +677,115 @@ async function processMessage(gmail, user, messageId) {
   // Get the gmail-scan tag
   const tagRow = getDb().prepare('SELECT id FROM tags WHERE name = ?').get('gmail-scan');
 
-  // Resolve vendor via alias learning
+  // ── Try JSON-LD structured data first ──────────────────────────────
+  // Retailers like Walmart, Amazon, Target embed schema.org Order data
+  // as JSON-LD in their HTML emails. This gives us clean parsed fields.
+  const rawHtml = extractRawHtml(msg.data.payload);
+  const jsonLdBlocks = rawHtml ? extractJsonLd(rawHtml) : null;
+  const schemaData = jsonLdBlocks ? parseSchemaData(jsonLdBlocks) : null;
+
+  // Resolve vendor: schema data > alias learning > sender name
   let vendorName = senderName || senderEmail.split('@')[0];
+  if (schemaData && schemaData.vendor) {
+    vendorName = schemaData.vendor;
+  }
   const alias = getDb().prepare(
     'SELECT corrected_name FROM vendor_aliases WHERE LOWER(ocr_text) = LOWER(?)'
   ).get(vendorName);
   if (alias) vendorName = alias.corrected_name;
 
-  // Parse fields from body text
+  // Normalize: "Walmart.com" → "Walmart"
+  vendorName = normalizeVendor(vendorName);
+
+  // Subject-based vendor extraction for payment apps and brokerages
+  // "You spent $36.12 at Chevron" → "Cash App · Chevron"
+  // "You paid $X to [Person]" → "Cash App · [Person]"
+  const atMatch = subject.match(/(?:you\s+(?:spent|paid))\s+\$[\d,.]+\s+(?:at|to)\s+(.+)/i);
+  if (atMatch) {
+    const destination = atMatch[1].trim();
+    vendorName = `${vendorName} · ${destination}`;
+  }
+
+  // Body-based enrichment for investment/brokerage emails
+  // Stash: "You sold $20.57 of US Treasury Income" → title shows sold + investment name
+  const soldMatch = bodyText.match(/you\s+sold\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
+  const boughtMatch = bodyText.match(/you\s+(?:bought|purchased)\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
+  if (soldMatch) {
+    const investmentName = soldMatch[2].trim();
+    vendorName = `${vendorName} · Sold ${investmentName}`;
+    if (!parsed.amount) parsed.amount = parseFloat(soldMatch[1].replace(/,/g, ''));
+  } else if (boughtMatch) {
+    const investmentName = boughtMatch[2].trim();
+    vendorName = `${vendorName} · Bought ${investmentName}`;
+    if (!parsed.amount) parsed.amount = parseFloat(boughtMatch[1].replace(/,/g, ''));
+  }
+
+  // Parse fields: schema data > text parsing fallback
   const parsed = parseReceiptFields(bodyText);
+  if (schemaData) {
+    if (schemaData.amount != null) parsed.amount = schemaData.amount;
+    if (schemaData.date) parsed.date = schemaData.date;
+  }
 
-  // Build notes block
-  const notesHeader = [
-    `📧 Gmail ${typeName}`,
-    `From: ${from}`,
-    `Date: ${new Date(emailDate).toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}`,
-    `Subject: ${subject}`,
-    '---',
-  ].join('\n');
+  // Build notes: clean schema format when available, text fallback otherwise
+  let fullNotes;
+  if (schemaData && !schemaData.minimal) {
+    fullNotes = formatSchemaOrder(schemaData, from, emailDate, subject);
+    console.log(`[Gmail Scanner] JSON-LD parsed: ${vendorName} ${schemaData.items.length} items`);
+  } else {
+    const notesHeader = [
+      `📧 Gmail ${typeName}`,
+      `From: ${from}`,
+      `Date: ${new Date(emailDate).toLocaleDateString('en-US', { weekday: 'short', year: 'numeric', month: 'short', day: 'numeric' })}`,
+      `Subject: ${subject}`,
+      '---',
+    ].join('\n');
+    const trimmedBody = bodyText.length > 3000
+      ? bodyText.substring(0, 3000) + '\n... (truncated)'
+      : bodyText;
+    fullNotes = notesHeader + '\n' + trimmedBody;
+  }
 
-  const trimmedBody = bodyText.length > 3000
-    ? bodyText.substring(0, 3000) + '\n... (truncated)'
-    : bodyText;
+  // Build a clean document title from vendor + amount instead of raw subject
+  // "Walmart.com - $260.00" instead of "Thanks for your delivery order, Nicholas"
+  function buildTitle(vendor, amount, typeName, subject) {
+    const parts = [vendor || 'Unknown'];
+    if (amount != null) parts.push(`$${parseFloat(amount).toFixed(2)}`);
+    if (typeName && typeName !== 'Receipt') parts.push(typeName);
+    const title = parts.join(' · ');
+    // If we only have vendor name and nothing else, append a hint from subject
+    if (!amount && typeName === 'Receipt') {
+      // Take first meaningful chunk of subject (strip Fw:/Re: prefixes)
+      const cleanSubj = subject.replace(/^(fw|fwd|re):\s*/gi, '').trim();
+      if (cleanSubj && cleanSubj.toLowerCase() !== vendor.toLowerCase()) {
+        return `${vendor} · ${cleanSubj.substring(0, 50)}`;
+      }
+    }
+    return title;
+  }
 
-  const fullNotes = notesHeader + '\n' + trimmedBody;
+  const docTitle = buildTitle(vendorName, parsed.amount, typeName, subject);
+
+  // Document-level dedup: prevent duplicates even after rescan clears tracking
+  // Checks ALL documents (manual uploads + gmail scans) for same vendor + amount + date
+  const existingDoc = getDb().prepare(`
+    SELECT id FROM documents
+    WHERE LOWER(vendor) = LOWER(?)
+      AND amount = ?
+      AND document_date = ?
+  `).get(
+    vendorName,
+    parsed.amount || null,
+    parsed.date || emailDate.split('T')[0]
+  );
+  if (existingDoc) {
+    // Record as processed so regular scans skip it, but don't create a new doc
+    getDb().prepare(`
+      INSERT INTO gmail_processed (user_id, message_id, thread_id, document_id, subject, sender, email_date, status, skip_reason)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'skipped', 'document already exists')
+    `).run(user.id, messageId, msg.data.threadId, existingDoc.id, subject, senderEmail, emailDate);
+    return { status: 'duplicate', reason: 'document already exists' };
+  }
 
   // Resolve owner for document_owners
   const ownerId = resolveOwnerId(user);
@@ -489,7 +853,7 @@ async function processMessage(gmail, user, messageId) {
         original_filename, mime_type, file_size, vendor, amount, document_date, notes, ocr_status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now'), datetime('now'))
     `).run(
-      documentId, subject, typeId, user.id,
+      documentId, docTitle, typeId, user.id,
       primaryFilePath, thumbnailRel,
       primaryOriginalName, primaryMime, primarySize,
       vendorName, parsed.amount || null,
@@ -556,9 +920,8 @@ async function processMessage(gmail, user, messageId) {
     // Run OCR on primary image (not PDFs) to refine parsed fields
     if (primaryMime && !primaryMime.includes('pdf')) {
       try {
-        const ocrResult = await processOCR(path.join(UPLOAD_PATH, primaryFilePath));
-        if (ocrResult) {
-          const ocrText = ocrResult.text || '';
+        const ocrText = extractText(path.join(UPLOAD_PATH, primaryFilePath));
+        if (ocrText) {
           const ocrParsed = parseReceiptFields(ocrText);
 
           const updates = [];
@@ -603,9 +966,9 @@ async function processMessage(gmail, user, messageId) {
         ocr_status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, 'text/plain', ?, ?, ?, ?, ?, 'complete', datetime('now'), datetime('now'))
     `).run(
-      documentId, subject, typeId, user.id,
+      documentId, docTitle, typeId, user.id,
       storedName,
-      `${subject.replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50)}.txt`,
+      `${vendorName.replace(/[^a-zA-Z0-9 ]/g, '').substring(0, 50)}.txt`,
       Buffer.byteLength(fullNotes, 'utf-8'),
       vendorName, parsed.amount || null,
       parsed.date || emailDate.split('T')[0],
@@ -631,6 +994,34 @@ async function processMessage(gmail, user, messageId) {
   if (tagRow) {
     getDb().prepare('INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)')
       .run(documentId, tagRow.id);
+  }
+
+  // Vendor tag learning: copy tags from the most recent document with the same vendor
+  // So if you tagged a Walmart receipt "groceries", the next Walmart scan gets "groceries" too
+  if (vendorName) {
+    const prevDoc = getDb().prepare(`
+      SELECT d.id FROM documents d
+      JOIN document_tags dt ON d.id = dt.document_id
+      JOIN tags t ON dt.tag_id = t.id
+      WHERE LOWER(d.vendor) = LOWER(?) AND d.id != ? AND t.name != 'gmail-scan'
+      ORDER BY d.created_at DESC LIMIT 1
+    `).get(vendorName, documentId);
+
+    if (prevDoc) {
+      const prevTags = getDb().prepare(`
+        SELECT t.id FROM document_tags dt
+        JOIN tags t ON dt.tag_id = t.id
+        WHERE dt.document_id = ? AND t.name != 'gmail-scan'
+      `).all(prevDoc.id);
+
+      for (const t of prevTags) {
+        getDb().prepare('INSERT OR IGNORE INTO document_tags (document_id, tag_id) VALUES (?, ?)')
+          .run(documentId, t.id);
+      }
+      if (prevTags.length > 0) {
+        console.log(`[Gmail Scanner] Vendor tags learned: ${vendorName} → ${prevTags.length} tags`);
+      }
+    }
   }
 
   // Record as processed

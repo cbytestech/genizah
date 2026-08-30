@@ -410,6 +410,12 @@ export default function SettingsPage() {
 
       <BackupStatus token={token} />
       <BackupHistory token={token} />
+
+      {/* Gmail Receipt Scanner */}
+      <GmailScanStatus />
+      <GmailScanHistory />
+      <GmailSenderRules />
+
       {toast && <div className="toast">{toast}</div>}
     </>
   );

@@ -9,8 +9,42 @@ const ACTION_ICONS = {
   deleted: '🗑️',
   expired_warning: '⚠️',
   shared: '🔗',
-  updated: '🔄'
+  updated: '🔄',
+  gmail_receipt: '📧',
+  gmail_scan_complete: '📬',
+  gmail_sender_rule: '🚫'
 };
+
+// Format activity detail text (handle JSON from gmail actions)
+function formatDetail(action, detail) {
+  if (!detail) return '';
+
+  // Try parsing JSON (gmail actions store structured data)
+  try {
+    const data = JSON.parse(detail);
+
+    if (action === 'gmail_receipt') {
+      const parts = [data.vendor || 'Unknown vendor'];
+      if (data.amount) parts.push(`$${data.amount}`);
+      if (data.type && data.type !== 'Receipt') parts.push(data.type);
+      return `📧 ${parts.join(' · ')}`;
+    }
+
+    if (action === 'gmail_scan_complete') {
+      return `Gmail scan: ${data.created} new, ${data.duplicates} skipped, ${data.errors} errors`;
+    }
+
+    if (action === 'gmail_sender_rule') {
+      return `${data.action === 'block' ? 'Blocked' : 'Unblocked'} sender: ${data.sender_email}`;
+    }
+
+    // Fallback for other JSON detail
+    return detail;
+  } catch {
+    // Not JSON, return as-is
+    return detail;
+  }
+}
 
 export default function ActivityPage() {
   const [activities, setActivities] = useState([]);
@@ -88,7 +122,7 @@ export default function ActivityPage() {
                   {ACTION_ICONS[item.action] || '📌'}
                 </span>
                 <div style={{ flex: 1 }}>
-                  <div className="activity-text" style={{ whiteSpace: 'pre-line' }}>{item.detail}</div>
+                  <div className="activity-text" style={{ whiteSpace: 'pre-line' }}>{formatDetail(item.action, item.detail)}</div>
                   <div className="activity-time">{formatTime(item.created_at)}</div>
                 </div>
               </div>

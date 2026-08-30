@@ -12,6 +12,27 @@ async function getStats() {
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+
+  // Format activity detail text (handle JSON from gmail actions)
+  function formatDetail(action, detail) {
+    if (!detail) return '';
+    try {
+      const data = JSON.parse(detail);
+      if (action === 'gmail_receipt') {
+        const parts = [data.vendor || 'Unknown'];
+        if (data.amount) parts.push(`$${data.amount}`);
+        if (data.type && data.type !== 'Receipt') parts.push(data.type);
+        return `📧 ${parts.join(' · ')}`;
+      }
+      if (action === 'gmail_scan_complete') {
+        return `📬 Scan: ${data.created} new, ${data.duplicates} skipped`;
+      }
+      if (action === 'gmail_sender_rule') {
+        return `🚫 ${data.action === 'block' ? 'Blocked' : 'Unblocked'}: ${data.sender_email}`;
+      }
+      return detail;
+    } catch { return detail; }
+  }
   const [documents, setDocuments] = useState([]);
   const [owners, setOwners] = useState([]);
   const [types, setTypes] = useState([]);
@@ -218,7 +239,7 @@ export default function DashboardPage() {
                   <div key={a.id} className="sidebar-activity"
                     style={{ cursor: a.document_id ? 'pointer' : 'default' }}
                     onClick={() => a.document_id && navigate(`/doc/${a.document_id}`)}>
-                    <div className="sidebar-activity-text">{a.detail}</div>
+                    <div className="sidebar-activity-text">{formatDetail(a.action, a.detail)}</div>
                     <div className="sidebar-activity-time">{formatDate(a.created_at)}</div>
                   </div>
                 ))}

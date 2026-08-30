@@ -4,19 +4,19 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
-const db = require('../models/database');
-const { authenticateToken } = require('../middleware/auth');
+const { getDb } = require('../models/database');
+const { authenticate } = require('../middleware/auth');
 const { scanUserGmail } = require('../services/gmailScanner');
 
 // All routes require auth
-router.use(authenticateToken);
+router.use(authenticate);
 
 // ── POST /api/gmail-scan/trigger ────────────────────────────────────────
 // Manual scan: checks last 7 days, available to any linked user
 
 router.post('/trigger', async (req, res) => {
   try {
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const user = getDb().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
 
     if (!user.google_refresh_token || !user.google_scopes?.includes('gmail.readonly')) {
       return res.status(400).json({
@@ -25,7 +25,7 @@ router.post('/trigger', async (req, res) => {
     }
 
     // Check for already-running scan
-    const running = db.prepare(`
+    const running = getDb().prepare(`
       SELECT id FROM gmail_scan_runs
       WHERE user_id = ? AND status = 'running'
     `).get(user.id);
@@ -48,36 +48,84 @@ router.post('/trigger', async (req, res) => {
   }
 });
 
+// ── POST /api/gmail-scan/rescan ─────────────────────────────────────────
+// Clears tracking history for this user and runs a fresh 7-day scan.
+// Existing documents are NOT deleted; only the "already processed" records
+// are cleared so the scanner re-evaluates every email.
+
+router.post('/rescan', async (req, res) => {
+  try {
+    const user = getDb().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+
+    if (!user.google_refresh_token || !user.google_scopes?.includes('gmail.readonly')) {
+      return res.status(400).json({
+        error: 'Gmail not linked. Link your Google account in Settings first.'
+      });
+    }
+
+    const running = getDb().prepare(`
+      SELECT id FROM gmail_scan_runs
+      WHERE user_id = ? AND status = 'running'
+    `).get(user.id);
+
+    if (running) {
+      return res.status(409).json({ error: 'A scan is already running.' });
+    }
+
+    // Clear processed message tracking for this user
+    const cleared = getDb().prepare(
+      'DELETE FROM gmail_processed WHERE user_id = ?'
+    ).run(user.id);
+
+    console.log(`[Gmail Scan] Rescan: cleared ${cleared.changes} processed records for user ${user.id}`);
+
+    res.json({
+      message: 'Tracking cleared, rescan started',
+      scan_type: 'manual',
+      records_cleared: cleared.changes,
+    });
+
+    // Run fresh scan
+    scanUserGmail(user, 'manual').catch(e => {
+      console.error('[Gmail Scan Route] Rescan error:', e.message);
+    });
+
+  } catch (e) {
+    console.error('[Gmail Scan Route] Rescan error:', e.message);
+    res.status(500).json({ error: 'Failed to start rescan' });
+  }
+});
+
 // ── GET /api/gmail-scan/status ──────────────────────────────────────────
 // Current scan status for the authenticated user
 
 router.get('/status', (req, res) => {
   try {
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const user = getDb().prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
 
     const hasGmail = !!(user.google_refresh_token && user.google_scopes?.includes('gmail.readonly'));
 
     // Most recent run
-    const lastRun = db.prepare(`
+    const lastRun = getDb().prepare(`
       SELECT * FROM gmail_scan_runs
       WHERE user_id = ?
       ORDER BY started_at DESC LIMIT 1
     `).get(req.user.id);
 
     // Running scan?
-    const isRunning = db.prepare(`
+    const isRunning = getDb().prepare(`
       SELECT id FROM gmail_scan_runs
       WHERE user_id = ? AND status = 'running'
     `).get(req.user.id);
 
     // Stats: total documents created from Gmail
-    const totalCreated = db.prepare(`
+    const totalCreated = getDb().prepare(`
       SELECT COUNT(*) as count FROM gmail_processed
       WHERE user_id = ? AND status = 'processed' AND document_id IS NOT NULL
     `).get(req.user.id);
 
     // Recent scans summary (last 24 hours)
-    const recentStats = db.prepare(`
+    const recentStats = getDb().prepare(`
       SELECT
         SUM(documents_created) as created,
         SUM(duplicates_skipped) as duplicates,
@@ -88,7 +136,7 @@ router.get('/status', (req, res) => {
     `).get(req.user.id);
 
     // Blocked sender count
-    const blockedCount = db.prepare(`
+    const blockedCount = getDb().prepare(`
       SELECT COUNT(*) as count FROM gmail_sender_rules
       WHERE user_id = ? AND action = 'block'
     `).get(req.user.id);
@@ -119,7 +167,7 @@ router.get('/history', (req, res) => {
   try {
     const limit = Math.min(parseInt(req.query.limit) || 20, 50);
 
-    const runs = db.prepare(`
+    const runs = getDb().prepare(`
       SELECT * FROM gmail_scan_runs
       WHERE user_id = ?
       ORDER BY started_at DESC
@@ -138,7 +186,7 @@ router.get('/history', (req, res) => {
 
 router.get('/rules', (req, res) => {
   try {
-    const rules = db.prepare(`
+    const rules = getDb().prepare(`
       SELECT * FROM gmail_sender_rules
       WHERE user_id = ?
       ORDER BY created_at DESC
@@ -164,13 +212,13 @@ router.post('/rules', (req, res) => {
     const validActions = ['allow', 'block'];
     const ruleAction = validActions.includes(action) ? action : 'block';
 
-    db.prepare(`
+    getDb().prepare(`
       INSERT OR REPLACE INTO gmail_sender_rules (user_id, sender_email, sender_name, action)
       VALUES (?, ?, ?, ?)
     `).run(req.user.id, sender_email.toLowerCase(), sender_name || null, ruleAction);
 
     // Log it
-    db.prepare(`
+    getDb().prepare(`
       INSERT INTO activity_log (id, user_id, action, detail, created_at)
       VALUES (?, ?, 'gmail_sender_rule', ?, datetime('now'))
     `).run(crypto.randomUUID(), req.user.id, JSON.stringify({ sender_email, action: ruleAction }));
@@ -186,7 +234,7 @@ router.post('/rules', (req, res) => {
 
 router.delete('/rules/:id', (req, res) => {
   try {
-    const rule = db.prepare(
+    const rule = getDb().prepare(
       'SELECT * FROM gmail_sender_rules WHERE id = ? AND user_id = ?'
     ).get(req.params.id, req.user.id);
 
@@ -194,7 +242,7 @@ router.delete('/rules/:id', (req, res) => {
       return res.status(404).json({ error: 'Rule not found' });
     }
 
-    db.prepare('DELETE FROM gmail_sender_rules WHERE id = ?').run(req.params.id);
+    getDb().prepare('DELETE FROM gmail_sender_rules WHERE id = ?').run(req.params.id);
 
     res.json({ message: 'Rule removed', sender_email: rule.sender_email });
   } catch (e) {
@@ -207,7 +255,7 @@ router.delete('/rules/:id', (req, res) => {
 
 router.get('/recent-senders', (req, res) => {
   try {
-    const senders = db.prepare(`
+    const senders = getDb().prepare(`
       SELECT sender, COUNT(*) as count, MAX(email_date) as last_seen,
              SUM(CASE WHEN status = 'processed' THEN 1 ELSE 0 END) as processed,
              SUM(CASE WHEN status = 'skipped' THEN 1 ELSE 0 END) as skipped
@@ -219,7 +267,7 @@ router.get('/recent-senders', (req, res) => {
     `).all(req.user.id);
 
     // Annotate with current rule status
-    const rules = db.prepare(
+    const rules = getDb().prepare(
       'SELECT sender_email, action FROM gmail_sender_rules WHERE user_id = ?'
     ).all(req.user.id);
     const ruleMap = new Map(rules.map(r => [r.sender_email, r.action]));
