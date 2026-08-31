@@ -25,6 +25,7 @@ function createApp() {
   app.use('/api/backup', require('../routes/backup'));
   app.use('/api/gmail-scan', require('../routes/gmail-scan'));
   app.use('/api/update', require('../routes/update'));
+  app.use('/api/reports', require('../routes/reports'));
 
   // Thumbnails: no auth (small previews, loaded by img tags)
   app.use('/thumbnails', express.static(

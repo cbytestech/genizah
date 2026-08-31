@@ -115,3 +115,19 @@ export async function addGmailSenderRule(sender_email, sender_name, action = 'bl
 }
 export async function removeGmailSenderRule(id) { return apiFetch(`/gmail-scan/rules/${id}`, { method: 'DELETE' }); }
 export async function getGmailRecentSenders() { return apiFetch('/gmail-scan/recent-senders'); }
+
+// Reports
+function reportQuery(params = {}) {
+  const query = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) { if (v !== undefined && v !== '' && v !== null) query.set(k, v); }
+  return query.toString();
+}
+export async function getReportSummary(params) { return apiFetch(`/reports/summary?${reportQuery(params)}`); }
+export async function getReportDashboard(params) { return apiFetch(`/reports/dashboard?${reportQuery(params)}`); }
+export async function getReportByTag(params) { return apiFetch(`/reports/by-tag?${reportQuery(params)}`); }
+export async function getReportByVendor(params) { return apiFetch(`/reports/by-vendor?${reportQuery(params)}`); }
+export async function getReportByOwner(params) { return apiFetch(`/reports/by-owner?${reportQuery(params)}`); }
+export async function getReportByMonth(params) { return apiFetch(`/reports/by-month?${reportQuery(params)}`); }
+export async function getReportByDayOfWeek(params) { return apiFetch(`/reports/by-day-of-week?${reportQuery(params)}`); }
+export async function getReportTrend(params) { return apiFetch(`/reports/trend?${reportQuery(params)}`); }
+export function getReportCsvUrl(params) { return `${API_BASE}/reports/export/csv?${reportQuery(params)}&token=${getToken()}`; }

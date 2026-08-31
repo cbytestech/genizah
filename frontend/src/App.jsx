@@ -6,6 +6,7 @@ import ScanPage from './pages/ScanPage';
 import DocumentPage from './pages/DocumentPage';
 import ActivityPage from './pages/ActivityPage';
 import SettingsPage from './pages/SettingsPage';
+import ReportsPage from './pages/ReportsPage';
 import { useEffect, useState } from 'react';
 import { getSyncStatus } from './services/api';
 
@@ -34,6 +35,7 @@ export default function App() {
             <Route path="/scan" element={<ScanPage />} />
             <Route path="/doc/:id" element={<DocumentPage />} />
             <Route path="/activity" element={<ActivityPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
@@ -49,6 +51,7 @@ export default function App() {
             <Route path="/scan" element={<ScanPage />} />
             <Route path="/doc/:id" element={<DocumentPage />} />
             <Route path="/activity" element={<ActivityPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<Navigate to="/" />} />
           </Routes>
@@ -83,6 +86,9 @@ function Sidebar({ user, onLogout }) {
         </NavLink>
         <NavLink to="/activity" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
           <span>🔔</span> Activity
+        </NavLink>
+        <NavLink to="/reports" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
+          <span>📊</span> Reports
         </NavLink>
         <NavLink to="/settings" className={({ isActive }) => `sidebar-link ${isActive ? 'active' : ''}`}>
           <span>⚙️</span> Settings
@@ -127,6 +133,7 @@ function MobileTopBar({ user, onLogout }) {
             <button className="slide-menu-item" onClick={() => navTo('/')}>📂 Dashboard</button>
             <button className="slide-menu-item" onClick={() => navTo('/scan')}>📷 Scan / Upload</button>
             <button className="slide-menu-item" onClick={() => navTo('/activity')}>🔔 Activity</button>
+            <button className="slide-menu-item" onClick={() => navTo('/reports')}>📊 Reports</button>
             <button className="slide-menu-item" onClick={() => navTo('/settings')}>⚙️ Settings</button>
             <div style={{ borderTop: '1px solid var(--border)', margin: '8px 0' }} />
             <button className="slide-menu-item" onClick={onLogout}>🚪 Log out</button>
