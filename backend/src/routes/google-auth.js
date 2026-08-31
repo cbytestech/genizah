@@ -61,24 +61,20 @@ router.get('/', (req, res) => {
     if (v.created < cutoff) pendingStates.delete(k);
   }
 
-  // Determine scopes based on user role (for linking, check the token)
-  let scopes = [...BASE_SCOPES, GMAIL_SCOPE];
+  // Determine scopes: always include Drive for backups (household app, both users are trusted)
+  let scopes = [...BASE_SCOPES, GMAIL_SCOPE, DRIVE_SCOPE];
 
   if (action === 'link' && stateData.token) {
     try {
       const jwt = require('jsonwebtoken');
       const decoded = jwt.verify(stateData.token, process.env.JWT_SECRET || 'CHANGE_ME');
-      if (decoded.role === 'admin') {
-        scopes.push(DRIVE_SCOPE);
-      }
       stateData.userId = decoded.id;
     } catch (err) {
       return res.status(401).json({ error: 'Invalid token for linking' });
     }
   }
 
-  // For login, we don't know the role yet, so request base + gmail only
-  // Admin can re-link later to get Drive scope, or we check after login
+  // Both login and link now request Drive scope, so admin doesn't need to re-link
 
   const params = new URLSearchParams({
     client_id: config.clientId,

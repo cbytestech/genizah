@@ -81,7 +81,7 @@ async function runBackup() {
 
     // Get all attachments
     const attachments = db.prepare(`
-      SELECT id, file_path, original_name, document_id
+      SELECT id, file_path, original_filename, document_id
       FROM document_attachments ORDER BY id
     `).all();
 
@@ -163,11 +163,17 @@ async function runBackup() {
       WHERE id = ?
     `).run(filesSynced, filesFailed, filesSkipped, dbBackedUp, totalBytes, status, runId);
 
+    const { v4: uuidv4 } = require('uuid');
+    const adminUser = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+    const adminId = adminUser ? adminUser.id : null;
+
     // Activity log
     const summary = `Backup ${status}: ${filesSynced} synced, ${filesSkipped} unchanged, ${filesFailed} failed, DB ${dbBackedUp ? 'saved' : 'skipped'} (${formatBytes(totalBytes)})`;
-    db.prepare(
-      `INSERT INTO activity_log (action, details, created_at) VALUES ('backup_complete', ?, datetime('now'))`
-    ).run(summary);
+    if (adminId) {
+      db.prepare(
+        `INSERT INTO activity_log (id, user_id, action, detail, created_at) VALUES (?, ?, 'backup_complete', ?, datetime('now'))`
+      ).run(uuidv4(), adminId, summary);
+    }
 
     // Also update the sync_status table so the dashboard health badge works
     db.prepare(`
@@ -188,9 +194,13 @@ async function runBackup() {
       WHERE id = ?
     `).run(filesSynced, filesFailed, filesSkipped, dbBackedUp, totalBytes, err.message, runId);
 
-    db.prepare(
-      `INSERT INTO activity_log (action, details, created_at) VALUES ('backup_failed', ?, datetime('now'))`
-    ).run(`Backup failed: ${err.message}`);
+    const { v4: uuidv4Alt } = require('uuid');
+    const adminAlt = db.prepare("SELECT id FROM users WHERE role = 'admin' LIMIT 1").get();
+    if (adminAlt) {
+      db.prepare(
+        `INSERT INTO activity_log (id, user_id, action, detail, created_at) VALUES (?, ?, 'backup_failed', ?, datetime('now'))`
+      ).run(uuidv4Alt(), adminAlt.id, `Backup failed: ${err.message}`);
+    }
 
     return db.prepare('SELECT * FROM backup_runs WHERE id = ?').get(runId);
 
