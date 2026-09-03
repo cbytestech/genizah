@@ -783,4 +783,50 @@ function csvEscape(val) {
   return str;
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+// GET /api/reports/expiring
+// Documents expiring within N days + recently expired (last 30 days)
+// ══════════════════════════════════════════════════════════════════
+router.get('/expiring', safeRoute((req, res) => {
+  const db = getDb();
+  const days = Math.min(parseInt(req.query.days) || 90, 365);
+
+  const today = new Date().toISOString().slice(0, 10);
+  const futureDate = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+  const pastDate = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+
+  // Documents expiring in the next N days
+  const expiringSoon = db.prepare(`
+    SELECT d.id, d.title, d.vendor, d.amount, d.document_date,
+      d.expiration_date, tp.name as type_name, tp.icon as type_icon
+    FROM documents d
+    LEFT JOIN document_types tp ON d.type_id = tp.id
+    WHERE d.status != 'archived'
+      AND d.expiration_date IS NOT NULL
+      AND d.expiration_date >= ?
+      AND d.expiration_date <= ?
+    ORDER BY d.expiration_date ASC
+  `).all(today, futureDate);
+
+  // Recently expired (last 30 days)
+  const recentlyExpired = db.prepare(`
+    SELECT d.id, d.title, d.vendor, d.amount, d.document_date,
+      d.expiration_date, tp.name as type_name, tp.icon as type_icon
+    FROM documents d
+    LEFT JOIN document_types tp ON d.type_id = tp.id
+    WHERE d.status != 'archived'
+      AND d.expiration_date IS NOT NULL
+      AND d.expiration_date >= ?
+      AND d.expiration_date < ?
+    ORDER BY d.expiration_date DESC
+  `).all(pastDate, today);
+
+  res.json({
+    expiring_soon: expiringSoon,
+    recently_expired: recentlyExpired,
+    window_days: days
+  });
+}));
+
 module.exports = router;
