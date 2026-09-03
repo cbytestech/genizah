@@ -1,9 +1,9 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   getReportSummary, getReportDashboard, getReportByTag,
   getReportByMonth, getReportByDayOfWeek, getReportByVendor,
-  getReportByOwner, getReportTrend, getReportCsvUrl, getTags, getOwners
+  getReportByOwner, getReportTrend, getReportExpiring, getReportCsvUrl, getTags, getOwners
 } from '../services/api';
 
 let Recharts = null;
@@ -61,10 +61,14 @@ export default function ReportsPage() {
   const [byVendor, setByVendor] = useState(null);
   const [byOwner, setByOwner] = useState(null);
   const [trend, setTrend] = useState(null);
+  const [expiring, setExpiring] = useState(null);
   const [loading, setLoading] = useState(true);
   const [chartsReady, setChartsReady] = useState(false);
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showFilters, setShowFilters] = useState(false);
+  const [comparePreset, setComparePreset] = useState('');
+  const [compareSummary, setCompareSummary] = useState(null);
+  const [compareByTag, setCompareByTag] = useState(null);
 
   useEffect(() => {
     import('recharts').then(mod => { Recharts = mod; setChartsReady(true); }).catch(() => {});
@@ -93,13 +97,34 @@ export default function ReportsPage() {
       getReportSummary(queryParams), getReportDashboard(queryParams),
       getReportByTag(queryParams), getReportByMonth(queryParams),
       getReportByDayOfWeek(queryParams), getReportByVendor(queryParams),
-      getReportByOwner(queryParams), getReportTrend(queryParams)
-    ]).then(([s, d, t, m, dow, v, o, tr]) => {
+      getReportByOwner(queryParams), getReportTrend(queryParams),
+      getReportExpiring(90)
+    ]).then(([s, d, t, m, dow, v, o, tr, exp]) => {
       setSummary(s); setDashboard(d); setByTag(t); setByMonth(m);
       setByDow(dow); setByVendor(v); setByOwner(o); setTrend(tr);
+      setExpiring(exp);
     }).catch(err => console.error('Reports error:', err))
       .finally(() => setLoading(false));
   }, [queryParams]);
+
+  // Comparison mode: fetch data for the compare preset
+  useEffect(() => {
+    if (!comparePreset) { setCompareSummary(null); setCompareByTag(null); return; }
+    const range = getPresetRange(comparePreset);
+    const cp = {};
+    if (range.start) cp.start = range.start;
+    if (range.end) cp.end = range.end;
+    if (selectedTags.length > 0) cp.tags = selectedTags.join(',');
+    if (selectedOwners.length > 0) cp.owners = selectedOwners.join(',');
+    Promise.all([getReportSummary(cp), getReportByTag(cp)])
+      .then(([s, t]) => { setCompareSummary(s); setCompareByTag(t); })
+      .catch(() => {});
+  }, [comparePreset, selectedTags, selectedOwners]);
+
+  function pctDelta(current, prior) {
+    if (!prior || prior === 0) return null;
+    return Math.round(((current - prior) / prior) * 1000) / 10;
+  }
 
   const presetLabels = {
     'this-week': 'This Week', 'last-week': 'Last Week',
@@ -199,6 +224,82 @@ export default function ReportsPage() {
         </div>
       )}
 
+      {/* Comparison Mode */}
+      <div style={{ marginBottom: '12px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '0.78rem', color: 'var(--text-dim)', fontWeight: 500 }}>Compare to:</span>
+          {[['', 'Off'], ['last-week', 'Last Week'], ['last-month', 'Last Month'], ['last-year', 'Last Year']].map(([key, label]) => (
+            <button key={key} className={`chip ${comparePreset === key ? 'active' : ''}`}
+              onClick={() => setComparePreset(key)}
+              style={{ fontSize: '0.72rem', padding: '2px 8px', ...(comparePreset === key ? {} : { borderColor: 'var(--border)', color: 'var(--text-dim)' }) }}>
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Comparison Summary */}
+      {compareSummary && summary && (
+        <div className="card" style={{ marginBottom: '16px', padding: '12px 16px' }}>
+          <h4 style={{ fontSize: '0.85rem', fontWeight: 600, marginBottom: '10px', color: 'var(--text-dim)' }}>
+            {presetLabels[preset]} vs {presetLabels[comparePreset] || comparePreset}
+          </h4>
+          <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr 1fr auto', gap: '6px 16px', fontSize: '0.82rem', alignItems: 'center' }}>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 500 }}>Metric</span>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 500, textAlign: 'right' }}>Current</span>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 500, textAlign: 'right' }}>Compare</span>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 500, textAlign: 'right' }}>Change</span>
+
+            <span>Income</span>
+            <span style={{ textAlign: 'right', color: 'var(--accent-green)' }}>${summary.total_income.toFixed(2)}</span>
+            <span style={{ textAlign: 'right', color: 'var(--accent-green)' }}>${compareSummary.total_income.toFixed(2)}</span>
+            <DeltaBadge current={summary.total_income} prior={compareSummary.total_income} invert={false} />
+
+            <span>Expenses</span>
+            <span style={{ textAlign: 'right', color: 'var(--accent-red)' }}>${summary.total_expenses.toFixed(2)}</span>
+            <span style={{ textAlign: 'right', color: 'var(--accent-red)' }}>${compareSummary.total_expenses.toFixed(2)}</span>
+            <DeltaBadge current={summary.total_expenses} prior={compareSummary.total_expenses} invert={true} />
+
+            <span>Net</span>
+            <span style={{ textAlign: 'right' }}>${summary.net.toFixed(2)}</span>
+            <span style={{ textAlign: 'right' }}>${compareSummary.net.toFixed(2)}</span>
+            <DeltaBadge current={summary.net} prior={compareSummary.net} invert={false} />
+
+            <span>Docs</span>
+            <span style={{ textAlign: 'right' }}>{summary.doc_count}</span>
+            <span style={{ textAlign: 'right' }}>{compareSummary.doc_count}</span>
+            <DeltaBadge current={summary.doc_count} prior={compareSummary.doc_count} invert={false} />
+          </div>
+
+          {/* Tag-by-tag comparison */}
+          {compareByTag && byTag && compareByTag.tags.length > 0 && (
+            <div style={{ marginTop: '12px', paddingTop: '10px', borderTop: '1px solid var(--border)' }}>
+              <h4 style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: '8px', color: 'var(--text-dim)' }}>By Tag</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr 1fr auto', gap: '4px 16px', fontSize: '0.78rem', alignItems: 'center' }}>
+                {(() => {
+                  const allTagNames = [...new Set([...byTag.tags.map(t => t.tag), ...compareByTag.tags.map(t => t.tag)])];
+                  return allTagNames.map(tagName => {
+                    const curr = byTag.tags.find(t => t.tag === tagName);
+                    const comp = compareByTag.tags.find(t => t.tag === tagName);
+                    const currVal = curr ? curr.expense : 0;
+                    const compVal = comp ? comp.expense : 0;
+                    if (currVal === 0 && compVal === 0) return null;
+                    return (
+                      <Fragment key={tagName}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{tagName}</span>
+                        <span style={{ textAlign: 'right' }}>${currVal.toFixed(2)}</span>
+                        <span style={{ textAlign: 'right' }}>${compVal.toFixed(2)}</span>
+                        <DeltaBadge current={currVal} prior={compVal} invert={true} />
+                      </Fragment>
+                    );
+                  });
+                })()}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Tabs */}
       <div className="report-tabs">
         {[['dashboard','🏠 Dashboard'],['charts','📊 Charts'],['breakdown','📋 Breakdown']].map(([k,l]) => (
@@ -284,6 +385,44 @@ export default function ReportsPage() {
                       <div key={i} style={{ fontSize: '0.82rem', color: 'var(--text-secondary)' }}>{f.icon} {f.text}</div>
                     ))}
                   </div>
+                </div>
+              )}
+
+              {/* Expiring Soon */}
+              {expiring && (expiring.expiring_soon.length > 0 || expiring.recently_expired.length > 0) && (
+                <div className="dash-card dash-card-wide">
+                  <div className="dash-card-icon">⏰</div>
+                  <div className="dash-card-title">Expiring Soon</div>
+                  {expiring.expiring_soon.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '6px' }}>
+                      {expiring.expiring_soon.slice(0, 5).map(d => {
+                        const daysLeft = Math.ceil((new Date(d.expiration_date) - Date.now()) / 86400000);
+                        const urgency = daysLeft <= 7 ? 'var(--accent-red)' : daysLeft <= 30 ? 'var(--accent-orange)' : 'var(--text-secondary)';
+                        return (
+                          <div key={d.id} onClick={() => navigate(`/doc/${d.id}`)} style={{ cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '4px 0', borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
+                            <span style={{ fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: 8 }}>
+                              {d.type_icon} {d.title}
+                            </span>
+                            <span style={{ fontSize: '0.75rem', fontWeight: 600, color: urgency, flexShrink: 0 }}>
+                              {daysLeft <= 0 ? 'Today!' : daysLeft === 1 ? 'Tomorrow' : `${daysLeft}d`}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '0.82rem', color: 'var(--text-dim)', marginTop: '4px' }}>Nothing expiring in the next 90 days</div>
+                  )}
+                  {expiring.recently_expired.length > 0 && (
+                    <div style={{ marginTop: '8px', paddingTop: '6px', borderTop: '1px solid var(--border)' }}>
+                      <div style={{ fontSize: '0.7rem', color: 'var(--accent-red)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: '4px', fontWeight: 600 }}>Recently Expired</div>
+                      {expiring.recently_expired.slice(0, 3).map(d => (
+                        <div key={d.id} onClick={() => navigate(`/doc/${d.id}`)} style={{ cursor: 'pointer', fontSize: '0.78rem', color: 'var(--text-dim)', padding: '2px 0' }}>
+                          {d.type_icon} {d.title} ({d.expiration_date})
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -431,5 +570,21 @@ export default function ReportsPage() {
         </>
       )}
     </div>
+  );
+}
+
+// ── Delta badge: shows ↑/↓ percentage with color ──
+function DeltaBadge({ current, prior, invert = false }) {
+  if (prior === 0 && current === 0) return <span style={{ textAlign: 'right', fontSize: '0.75rem', color: 'var(--text-dim)' }}>—</span>;
+  if (prior === 0) return <span style={{ textAlign: 'right', fontSize: '0.75rem', color: 'var(--accent-blue)' }}>new</span>;
+  const pct = Math.round(((current - prior) / Math.abs(prior)) * 1000) / 10;
+  const isUp = pct > 0;
+  // For expenses, up is bad (red). For income/net, up is good (green). "invert" flips this.
+  const isGood = invert ? !isUp : isUp;
+  const color = pct === 0 ? 'var(--text-dim)' : isGood ? 'var(--accent-green)' : 'var(--accent-red)';
+  return (
+    <span style={{ textAlign: 'right', fontSize: '0.75rem', fontWeight: 600, color }}>
+      {pct > 0 ? '↑' : pct < 0 ? '↓' : '→'}{Math.abs(pct)}%
+    </span>
   );
 }

@@ -131,3 +131,4 @@ export async function getReportByMonth(params) { return apiFetch(`/reports/by-mo
 export async function getReportByDayOfWeek(params) { return apiFetch(`/reports/by-day-of-week?${reportQuery(params)}`); }
 export async function getReportTrend(params) { return apiFetch(`/reports/trend?${reportQuery(params)}`); }
 export function getReportCsvUrl(params) { return `${API_BASE}/reports/export/csv?${reportQuery(params)}&token=${getToken()}`; }
+export async function getReportExpiring(days = 90) { return apiFetch(`/reports/expiring?days=${days}`); }

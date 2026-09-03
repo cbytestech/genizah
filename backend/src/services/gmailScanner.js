@@ -1,6 +1,13 @@
-// Gmail Receipt Scanner Service
+// Gmail Receipt Scanner Service (v0.5d.3)
 // Scans linked Gmail accounts for receipts, invoices, warranties, manuals
 // Creates Genizah documents automatically with OCR and parsed metadata
+//
+// v0.5d.3 changes:
+//   - Venmo: parse "for" note from body, extract actual vendor, dedup against vendor receipts
+//   - DoorDash: extract restaurant name, format title as "DD, [restaurant], $total"
+//   - Audible + Fetch: default-blocked domains (checked alongside user rules)
+//   - Cinch Auto: auto-classify as Subscription, set vendor to "Cinch Auto"
+//   - Bug fix: moved parseReceiptFields() call before sold/bought match (was ReferenceError)
 //
 // Schema reference (all PKs are TEXT UUIDs):
 //   documents:            id, title, type_id, uploaded_by, file_path (NOT NULL), vendor, amount, document_date, notes, ocr_text, ...
@@ -39,7 +46,10 @@ const SEARCH_KEYWORDS = [
   'your order', 'your purchase', 'thanks for your order',
   'delivery order', 'thanks for your',
   'you spent', 'transaction complete', 'payment successful',
-  'Delivered:', 'Confirmation'
+  'Delivered:', 'Confirmation',
+  'you paid',          // Venmo payment notifications
+  'paid you',          // Venmo incoming payments
+  'cash back',         // Venmo cashback
 ].map(k => `"${k}"`).join(' OR ');
 
 // Subject-only matching keeps it targeted; -in:sent excludes user's own forwards
@@ -63,6 +73,24 @@ const SUPPORTED_MIME = new Set([
   'application/pdf',
   'image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/tiff',
 ]);
+
+// ── Default Blocked Domains ─────────────────────────────────────────────
+// Checked alongside per-user gmail_sender_rules. These senders generate
+// noise (rewards programs, audiobook confirmations) with no financial value.
+
+const DEFAULT_BLOCKED_DOMAINS = [
+  'audible.com',       // Audiobook purchase confirmations, no dollar amount
+  'fetchrewards.com',  // Rewards/points app, not real receipts
+];
+
+// ── Sender-specific Overrides ───────────────────────────────────────────
+// Map sender domains/addresses to auto-classification behavior.
+// Checked in processMessage after body extraction.
+
+const SENDER_OVERRIDES = {
+  // Cinch Auto: home warranty / auto protection recurring payments
+  'cinch.com': { vendor: 'Cinch Auto', type: 'Subscription' },
+};
 
 // Concurrency guard: prevents overlapping scans per user
 const activeScans = new Map();
@@ -560,9 +588,18 @@ function classifyType(subject) {
 // ── Sender Rule Checks ──────────────────────────────────────────────────
 
 function isSenderBlocked(userId, senderEmail) {
+  const email = senderEmail.toLowerCase();
+
+  // Check default-blocked domains first (global, no DB lookup)
+  const domain = email.split('@')[1] || '';
+  if (DEFAULT_BLOCKED_DOMAINS.some(d => domain === d || domain.endsWith('.' + d))) {
+    return true;
+  }
+
+  // Then check user's custom rules
   const rule = getDb().prepare(
     'SELECT action FROM gmail_sender_rules WHERE user_id = ? AND sender_email = ?'
-  ).get(userId, senderEmail.toLowerCase());
+  ).get(userId, email);
   return rule && rule.action === 'block';
 }
 
@@ -576,6 +613,194 @@ function normalizeVendor(name) {
     .replace(/\.(com|net|org|co|io|us|biz)$/i, '')  // strip TLDs
     .replace(/^(www\.)/i, '')                         // strip www.
     .trim();
+}
+
+// ── Payment Processor Prefix Stripping ──────────────────────────────────
+// Card processor codes like "DD *DOORDASH", "SQ *COFFEESHOP", "TST* RESTAURANT"
+// appear in Venmo/bank subjects. Strip the prefix to get the real vendor name.
+
+function stripProcessorPrefix(name) {
+  if (!name) return name;
+  return name
+    .replace(/^(DD|SQ|TST|PAY)\s*\*\s*/i, '')  // "DD *DOORDASH" → "DOORDASH"
+    .replace(/^\*\s*/, '')                        // leading * remnants
+    .trim();
+}
+
+// ── Venmo Email Parsing ─────────────────────────────────────────────────
+// Venmo sends several email types:
+//   "You paid [Name] $XX.XX"           → outgoing payment
+//   "[Name] paid you $XX.XX"           → incoming payment
+//   "Cash back for your purchase at X" → cashback notification (debit card)
+//
+// The body contains a "for" note (what the sender typed as the purpose),
+// which often names the real vendor (e.g., "DoorDash", "rent", "pizza").
+
+function parseVenmoEmail(subject, bodyText) {
+  const result = {
+    vendor: null,      // resolved vendor name for the document
+    forNote: null,     // the "for" description from the payment
+    typeOverride: null, // override document type (e.g., Check for incoming)
+    realVendor: null,  // the actual vendor for dedup (stripped of processor prefix)
+  };
+
+  // Pattern 1: "Cash back for your purchase at DD *DOORDASH"
+  const cashbackMatch = subject.match(/cash\s*back\s+for\s+your\s+purchase\s+at\s+(.+)/i);
+  if (cashbackMatch) {
+    const raw = cashbackMatch[1].trim();
+    const cleaned = stripProcessorPrefix(raw);
+    // Cashback is a refund-like credit, vendor is the merchant
+    result.vendor = `Venmo · ${cleaned}`;
+    result.realVendor = cleaned;
+    result.typeOverride = 'Refund';
+    return result;
+  }
+
+  // Pattern 2: "You paid [Name] $XX.XX"
+  const paidMatch = subject.match(/you\s+paid\s+(.+?)\s+\$[\d,.]+/i);
+  if (paidMatch) {
+    const recipient = paidMatch[1].trim();
+    result.vendor = `Venmo · ${recipient}`;
+  }
+
+  // Pattern 3: "[Name] paid you $XX.XX"
+  const receivedMatch = subject.match(/(.+?)\s+paid\s+you\s+\$[\d,.]+/i);
+  if (receivedMatch && !paidMatch) {
+    const sender = receivedMatch[1].trim();
+    result.vendor = `Venmo · ${sender}`;
+    result.typeOverride = 'Check'; // incoming money
+  }
+
+  // Pattern 4: "You completed a payment of $XX.XX"
+  if (!result.vendor) {
+    const completedMatch = subject.match(/completed\s+a\s+payment/i);
+    if (completedMatch) {
+      result.vendor = 'Venmo';
+    }
+  }
+
+  // Pattern 5: "Receipt from [MERCHANT] - $XX.XX" (Venmo debit card purchases)
+  const receiptFromMatch = subject.match(/receipt\s+from\s+(.+?)\s*-\s*\$[\d,.]+/i);
+  if (receiptFromMatch && !result.vendor) {
+    const merchant = stripProcessorPrefix(receiptFromMatch[1].trim());
+    result.vendor = `Venmo · ${merchant}`;
+    result.realVendor = merchant;
+  }
+
+    // Extract "for" note from body
+  // Venmo email bodies (after HTML strip) typically have the note on its own line
+  // after the amount, before the footer links. Common patterns:
+  //   "- DoorDash"
+  //   "For: rent"
+  //   just a line by itself between the amount and "View on Venmo"
+  if (bodyText) {
+    const lines = bodyText.split('\n').map(l => l.trim()).filter(Boolean);
+
+    // Try explicit "for" label first
+    for (const line of lines) {
+      // Match lines like "for DoorDash" or "For: pizza money" but not "for more details"
+      const forMatch = line.match(/^(?:for|note)\s*[:：]?\s+(.+)/i);
+      if (forMatch) {
+        const note = forMatch[1].trim();
+        // Skip generic/navigational phrases
+        if (note.length < 80 &&
+            !/^(more\s+details|your\s+records|questions|help|support|any\s+questions)/i.test(note)) {
+          result.forNote = note;
+          break;
+        }
+      }
+    }
+
+    // Try finding the note between amount and footer
+    // Look for a line with just a dollar amount, then grab what follows
+    if (!result.forNote) {
+      for (let i = 0; i < lines.length - 1; i++) {
+        if (/^\$[\d,.]+$/.test(lines[i]) || /^-\s*\$[\d,.]+$/.test(lines[i])) {
+          // The next non-empty line might be the note
+          const candidate = lines[i + 1];
+          if (candidate &&
+              candidate.length < 80 &&
+              !/^(view|manage|venmo|help|©|unsubscribe|privacy)/i.test(candidate) &&
+              !/^https?:\/\//i.test(candidate) &&
+              !/^\d+$/.test(candidate)) {
+            result.forNote = candidate.replace(/^[-–—]\s*/, '').trim(); // strip leading dash
+            break;
+          }
+        }
+      }
+    }
+
+    // If we found a "for" note, use it to enrich the vendor name
+    if (result.forNote && result.vendor) {
+      const cleanNote = stripProcessorPrefix(result.forNote);
+      // If the note looks like a business name (not a personal message), use it
+      if (cleanNote.length < 40 && !/\s{2,}/.test(cleanNote)) {
+        result.realVendor = cleanNote;
+        // Append the real destination to the vendor
+        // "Venmo · Emily" becomes "Venmo · Emily (DoorDash)"
+        if (!result.vendor.toLowerCase().includes(cleanNote.toLowerCase())) {
+          result.vendor = `${result.vendor} (${cleanNote})`;
+        }
+      }
+    }
+  }
+
+  // Default vendor if nothing matched
+  if (!result.vendor) {
+    result.vendor = 'Venmo';
+  }
+
+  return result;
+}
+
+// ── DoorDash Email Parsing ──────────────────────────────────────────────
+// DoorDash sends order confirmations with restaurant names in subject or body.
+// Format title as "DD, [restaurant], $total" per user preference.
+
+function parseDoorDashEmail(subject, bodyText) {
+  const result = { restaurant: null };
+
+  // Subject patterns:
+  //   "Your order from [Restaurant] is confirmed"
+  //   "Order from [Restaurant]"
+  //   "Your [Restaurant] order is on its way" (would be skipped as tracking)
+  //   "Delivery order from [Restaurant]"
+  const subjectPatterns = [
+    /(?:order|delivery)\s+from\s+(.+?)(?:\s+is\s|\s+has\s|\s*-\s*|\s*$)/i,
+    /your\s+(.+?)\s+order/i,
+  ];
+
+  for (const pat of subjectPatterns) {
+    const m = subject.match(pat);
+    if (m) {
+      const name = m[1].trim();
+      // Filter out generic words that aren't restaurant names
+      if (name.toLowerCase() !== 'doordash' && name.length < 50) {
+        result.restaurant = name;
+        break;
+      }
+    }
+  }
+
+  // Try body if subject didn't have it
+  if (!result.restaurant && bodyText) {
+    const bodyPatterns = [
+      /(?:order|delivery)\s+from\s+(.+?)(?:\n|$)/im,
+      /restaurant\s*[:：]\s*(.+?)(?:\n|$)/im,
+    ];
+    for (const pat of bodyPatterns) {
+      const m = bodyText.match(pat);
+      if (m) {
+        const name = m[1].trim();
+        if (name.length < 50) {
+          result.restaurant = name;
+          break;
+        }
+      }
+    }
+  }
+
+  return result;
 }
 
 // ── Owner Resolution ────────────────────────────────────────────────────
@@ -633,7 +858,7 @@ async function processMessage(gmail, user, messageId) {
     return { status: 'duplicate' };
   }
 
-  // Check sender blacklist
+  // Check sender blacklist (includes DEFAULT_BLOCKED_DOMAINS)
   if (isSenderBlocked(user.id, senderEmail)) {
     getDb().prepare(`
       INSERT INTO gmail_processed (user_id, message_id, thread_id, subject, sender, email_date, status, skip_reason)
@@ -662,8 +887,39 @@ async function processMessage(gmail, user, messageId) {
   const attachments = findAttachments(msg.data.payload);
   const bodyText = extractBodyText(msg.data.payload);
 
-  // Determine document type from subject
-  const typeName = classifyType(subject);
+  // ── Vendor-specific parsing ────────────────────────────────────────
+  // Runs before generic vendor resolution. Each parser can set overrides
+  // for vendor name, document type, and title format.
+
+  const senderDomain = (senderEmail.split('@')[1] || '').toLowerCase();
+  let vendorOverride = null;
+  let typeOverride = null;
+  let titleOverride = null;
+  let venmoData = null;
+  let doordashData = null;
+
+  // Venmo: parse "for" note, extract real vendor for dedup
+  if (senderDomain === 'venmo.com' || senderEmail.includes('venmo')) {
+    venmoData = parseVenmoEmail(subject, bodyText);
+    if (venmoData.vendor) vendorOverride = venmoData.vendor;
+    if (venmoData.typeOverride) typeOverride = venmoData.typeOverride;
+  }
+
+  // DoorDash: extract restaurant name for title formatting
+  if (senderDomain === 'doordash.com' || senderEmail.includes('doordash')) {
+    doordashData = parseDoorDashEmail(subject, bodyText);
+    // vendorOverride stays null; we'll handle the title in buildTitle
+  }
+
+  // Sender-based overrides (Cinch Auto, etc.)
+  const senderOverride = SENDER_OVERRIDES[senderDomain];
+  if (senderOverride) {
+    if (senderOverride.vendor) vendorOverride = senderOverride.vendor;
+    if (senderOverride.type) typeOverride = senderOverride.type;
+  }
+
+  // ── Determine document type ────────────────────────────────────────
+  const typeName = typeOverride || classifyType(subject);
   const typeRow = getDb().prepare('SELECT id FROM document_types WHERE name = ?').get(typeName);
   const typeId = typeRow ? typeRow.id : null;
 
@@ -686,47 +942,54 @@ async function processMessage(gmail, user, messageId) {
   const jsonLdBlocks = rawHtml ? extractJsonLd(rawHtml) : null;
   const schemaData = jsonLdBlocks ? parseSchemaData(jsonLdBlocks) : null;
 
-  // Resolve vendor: schema data > alias learning > sender name
-  let vendorName = senderName || senderEmail.split('@')[0];
-  if (schemaData && schemaData.vendor) {
-    vendorName = schemaData.vendor;
-  }
-  const alias = getDb().prepare(
-    'SELECT corrected_name FROM vendor_aliases WHERE LOWER(ocr_text) = LOWER(?)'
-  ).get(vendorName);
-  if (alias) vendorName = alias.corrected_name;
+  // Resolve vendor: override > schema data > alias learning > sender name
+  let vendorName = vendorOverride || senderName || senderEmail.split('@')[0];
+  if (!vendorOverride) {
+    if (schemaData && schemaData.vendor) {
+      vendorName = schemaData.vendor;
+    }
+    const alias = getDb().prepare(
+      'SELECT corrected_name FROM vendor_aliases WHERE LOWER(ocr_text) = LOWER(?)'
+    ).get(vendorName);
+    if (alias) vendorName = alias.corrected_name;
 
-  // Normalize: "Walmart.com" → "Walmart"
-  vendorName = normalizeVendor(vendorName);
+    // Normalize: "Walmart.com" → "Walmart"
+    vendorName = normalizeVendor(vendorName);
+  }
 
   // Subject-based vendor extraction for payment apps and brokerages
   // "You spent $36.12 at Chevron" → "Cash App · Chevron"
   // "You paid $X to [Person]" → "Cash App · [Person]"
-  const atMatch = subject.match(/(?:you\s+(?:spent|paid))\s+\$[\d,.]+\s+(?:at|to)\s+(.+)/i);
-  if (atMatch) {
-    const destination = atMatch[1].trim();
-    vendorName = `${vendorName} · ${destination}`;
+  // Skip if we already have a vendor override (Venmo, Cinch, etc.)
+  if (!vendorOverride) {
+    const atMatch = subject.match(/(?:you\s+(?:spent|paid))\s+\$[\d,.]+\s+(?:at|to)\s+(.+)/i);
+    if (atMatch) {
+      const destination = atMatch[1].trim();
+      vendorName = `${vendorName} · ${destination}`;
+    }
   }
 
-  // Body-based enrichment for investment/brokerage emails
-  // Stash: "You sold $20.57 of US Treasury Income" → title shows sold + investment name
-  const soldMatch = bodyText.match(/you\s+sold\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
-  const boughtMatch = bodyText.match(/you\s+(?:bought|purchased)\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
-  if (soldMatch) {
-    const investmentName = soldMatch[2].trim();
-    vendorName = `${vendorName} · Sold ${investmentName}`;
-    if (!parsed.amount) parsed.amount = parseFloat(soldMatch[1].replace(/,/g, ''));
-  } else if (boughtMatch) {
-    const investmentName = boughtMatch[2].trim();
-    vendorName = `${vendorName} · Bought ${investmentName}`;
-    if (!parsed.amount) parsed.amount = parseFloat(boughtMatch[1].replace(/,/g, ''));
-  }
-
-  // Parse fields: schema data > text parsing fallback
+  // ── Parse receipt fields (MUST be before sold/bought body matching) ──
   const parsed = parseReceiptFields(bodyText);
   if (schemaData) {
     if (schemaData.amount != null) parsed.amount = schemaData.amount;
     if (schemaData.date) parsed.date = schemaData.date;
+  }
+
+  // Body-based enrichment for investment/brokerage emails
+  // Stash: "You sold $20.57 of US Treasury Income" → title shows sold + investment name
+  if (!vendorOverride) {
+    const soldMatch = bodyText.match(/you\s+sold\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
+    const boughtMatch = bodyText.match(/you\s+(?:bought|purchased)\s+\$([\d,.]+)\s+of\s+(.+?)(?:\s+Whenever|\s*$)/im);
+    if (soldMatch) {
+      const investmentName = soldMatch[2].trim();
+      vendorName = `${vendorName} · Sold ${investmentName}`;
+      if (!parsed.amount) parsed.amount = parseFloat(soldMatch[1].replace(/,/g, ''));
+    } else if (boughtMatch) {
+      const investmentName = boughtMatch[2].trim();
+      vendorName = `${vendorName} · Bought ${investmentName}`;
+      if (!parsed.amount) parsed.amount = parseFloat(boughtMatch[1].replace(/,/g, ''));
+    }
   }
 
   // Build notes: clean schema format when available, text fallback otherwise
@@ -748,9 +1011,16 @@ async function processMessage(gmail, user, messageId) {
     fullNotes = notesHeader + '\n' + trimmedBody;
   }
 
-  // Build a clean document title from vendor + amount instead of raw subject
-  // "Walmart.com - $260.00" instead of "Thanks for your delivery order, Nicholas"
+  // ── Build document title ────────────────────────────────────────────
   function buildTitle(vendor, amount, typeName, subject) {
+    // DoorDash special format: "DD · [restaurant] · $total"
+    if (doordashData) {
+      const parts = ['DD'];
+      if (doordashData.restaurant) parts.push(doordashData.restaurant);
+      if (amount != null) parts.push(`$${parseFloat(amount).toFixed(2)}`);
+      return parts.join(' · ');
+    }
+
     const parts = [vendor || 'Unknown'];
     if (amount != null) parts.push(`$${parseFloat(amount).toFixed(2)}`);
     if (typeName && typeName !== 'Receipt') parts.push(typeName);
@@ -766,7 +1036,55 @@ async function processMessage(gmail, user, messageId) {
     return title;
   }
 
-  const docTitle = buildTitle(vendorName, parsed.amount, typeName, subject);
+  const docTitle = titleOverride || buildTitle(vendorName, parsed.amount, typeName, subject);
+
+  // ── Venmo dedup against actual vendor receipts ──────────────────────
+  // If this is a Venmo payment and the "for" note mentions a vendor,
+  // check if a receipt from that vendor already exists for the same amount
+  // on the same day. If so, skip (it's the same transaction).
+  if (venmoData && venmoData.realVendor && parsed.amount) {
+    const realVendorLower = venmoData.realVendor.toLowerCase();
+    const docDate = parsed.date || emailDate.split('T')[0];
+    const vendorReceipt = getDb().prepare(`
+      SELECT id FROM documents
+      WHERE amount = ?
+        AND document_date = ?
+        AND LOWER(vendor) LIKE ?
+        AND id NOT IN (
+          SELECT document_id FROM document_tags dt
+          JOIN tags t ON dt.tag_id = t.id
+          WHERE t.name = 'gmail-scan'
+            AND document_id IS NOT NULL
+        )
+    `).get(parsed.amount, docDate, `%${realVendorLower}%`);
+
+    if (vendorReceipt) {
+      console.log(`[Gmail Scanner] Venmo dedup: skipping ${vendorName} $${parsed.amount} (matches vendor receipt ${vendorReceipt.id})`);
+      getDb().prepare(`
+        INSERT INTO gmail_processed (user_id, message_id, thread_id, subject, sender, email_date, status, skip_reason)
+        VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'venmo dedup: matching vendor receipt exists')
+      `).run(user.id, messageId, msg.data.threadId, subject, senderEmail, emailDate);
+      return { status: 'duplicate', reason: 'venmo dedup against vendor receipt' };
+    }
+
+    // Also check gmail-scanned docs from the actual vendor (e.g., DoorDash sent its own receipt)
+    const gmailVendorReceipt = getDb().prepare(`
+      SELECT id FROM documents
+      WHERE amount = ?
+        AND document_date = ?
+        AND LOWER(vendor) LIKE ?
+        AND LOWER(vendor) NOT LIKE '%venmo%'
+    `).get(parsed.amount, docDate, `%${realVendorLower}%`);
+
+    if (gmailVendorReceipt) {
+      console.log(`[Gmail Scanner] Venmo dedup: skipping ${vendorName} $${parsed.amount} (matches gmail vendor receipt)`);
+      getDb().prepare(`
+        INSERT INTO gmail_processed (user_id, message_id, thread_id, subject, sender, email_date, status, skip_reason)
+        VALUES (?, ?, ?, ?, ?, ?, 'skipped', 'venmo dedup: matching vendor receipt exists')
+      `).run(user.id, messageId, msg.data.threadId, subject, senderEmail, emailDate);
+      return { status: 'duplicate', reason: 'venmo dedup against vendor receipt' };
+    }
+  }
 
   // Document-level dedup: prevent duplicates even after rescan clears tracking
   // Checks ALL documents (manual uploads + gmail scans) for same vendor + amount + date
