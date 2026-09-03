@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import {
   getReportSummary, getReportDashboard, getReportByTag,
   getReportByMonth, getReportByDayOfWeek, getReportByVendor,
-  getReportByOwner, getReportTrend, getReportExpiring, getReportCsvUrl, getTags, getOwners
+  getReportByOwner, getReportTrend, getReportExpiring, getReportCsvUrl, getReportPdfUrl, getTags, getOwners
 } from '../services/api';
 
 let Recharts = null;
@@ -142,6 +142,7 @@ export default function ReportsPage() {
             onClick={() => setShowFilters(!showFilters)}>
             🔽 Filters {(selectedTags.length > 0 || selectedOwners.length > 0) ? `(${selectedTags.length + selectedOwners.length})` : ''}
           </button>
+          <a href={getReportPdfUrl(queryParams)} className="btn btn-ghost" style={{ fontSize: '0.78rem', padding: '4px 10px', textDecoration: 'none' }}>📄 PDF</a>
           <a href={getReportCsvUrl(queryParams)} className="btn btn-ghost" style={{ fontSize: '0.78rem', padding: '4px 10px', textDecoration: 'none' }}>📥 CSV</a>
         </div>
       </div>

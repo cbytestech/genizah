@@ -783,7 +783,6 @@ function csvEscape(val) {
   return str;
 }
 
-
 // ══════════════════════════════════════════════════════════════════
 // GET /api/reports/expiring
 // Documents expiring within N days + recently expired (last 30 days)
@@ -796,7 +795,6 @@ router.get('/expiring', safeRoute((req, res) => {
   const futureDate = new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
   const pastDate = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
 
-  // Documents expiring in the next N days
   const expiringSoon = db.prepare(`
     SELECT d.id, d.title, d.vendor, d.amount, d.document_date,
       d.expiration_date, tp.name as type_name, tp.icon as type_icon
@@ -809,7 +807,6 @@ router.get('/expiring', safeRoute((req, res) => {
     ORDER BY d.expiration_date ASC
   `).all(today, futureDate);
 
-  // Recently expired (last 30 days)
   const recentlyExpired = db.prepare(`
     SELECT d.id, d.title, d.vendor, d.amount, d.document_date,
       d.expiration_date, tp.name as type_name, tp.icon as type_icon
@@ -827,6 +824,179 @@ router.get('/expiring', safeRoute((req, res) => {
     recently_expired: recentlyExpired,
     window_days: days
   });
+}));
+
+// ══════════════════════════════════════════════════════════════════
+// GET /api/reports/export/pdf
+// PDF report download with summary header + document table
+// Uses pdfkit; accepts same filters as CSV + token in query param
+// ══════════════════════════════════════════════════════════════════
+router.get('/export/pdf', safeRoute((req, res) => {
+  const PDFDocument = require('pdfkit');
+  const db = getDb();
+  const { where, params } = buildFilters(req.query);
+  const itp = incomeTypePlaceholders();
+
+  // ── Summary data ──
+  const summary = db.prepare(`
+    SELECT
+      COUNT(*) as doc_count,
+      COALESCE(SUM(CASE WHEN tp.name IN (${itp}) THEN d.amount ELSE 0 END), 0) as total_income,
+      COALESCE(SUM(CASE WHEN tp.name NOT IN (${itp}) AND d.amount IS NOT NULL THEN d.amount ELSE 0 END), 0) as total_expenses
+    FROM documents d
+    LEFT JOIN document_types tp ON d.type_id = tp.id
+    WHERE ${where}
+  `).get(...INCOME_TYPES, ...INCOME_TYPES, ...params);
+  summary.net = Math.round((summary.total_income - summary.total_expenses) * 100) / 100;
+
+  // ── Document rows ──
+  const rows = db.prepare(`
+    SELECT
+      d.id, d.document_date, d.title, d.vendor, d.amount,
+      tp.name as type_name,
+      CASE WHEN tp.name IN (${itp}) THEN 'Income' ELSE 'Expense' END as direction
+    FROM documents d
+    LEFT JOIN document_types tp ON d.type_id = tp.id
+    WHERE ${where}
+    ORDER BY d.document_date ASC
+  `).all(...INCOME_TYPES, ...params);
+
+  const tagStmt = db.prepare('SELECT t.name FROM tags t JOIN document_tags dt ON t.id = dt.tag_id WHERE dt.document_id = ?');
+  const ownerStmt = db.prepare('SELECT o.name FROM owners o JOIN document_owners do2 ON o.id = do2.owner_id WHERE do2.document_id = ?');
+
+  // ── Build PDF ──
+  const doc = new PDFDocument({ size: 'letter', margin: 50, bufferPages: true });
+
+  // Date range for header
+  const startDate = req.query.start || 'All';
+  const endDate = req.query.end || 'Time';
+  const filename = `genizah-report-${startDate}-to-${endDate}.pdf`;
+
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  doc.pipe(res);
+
+  // Colors
+  const ORANGE = '#ff9800';
+  const GREEN = '#3ad98e';
+  const RED = '#ef5350';
+  const DARK = '#1a1d2e';
+  const GRAY = '#6b7280';
+  const LIGHT_BG = '#f8f9fa';
+  const WHITE = '#ffffff';
+  const BORDER = '#e5e7eb';
+
+  // ── Header ──
+  doc.rect(0, 0, doc.page.width, 80).fill(DARK);
+  doc.fontSize(22).fill(ORANGE).text('GENIZAH', 50, 22, { continued: true });
+  doc.fontSize(11).fill('#8a8d9b').text('  Digital Filing Cabinet', { baseline: 'alphabetic' });
+  doc.fontSize(9).fill('#8a8d9b').text(
+    `Report: ${startDate === 'All' ? 'All Time' : startDate + ' to ' + endDate}`,
+    50, 50
+  );
+  doc.fontSize(8).fill('#8a8d9b').text(
+    `Generated ${new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}`,
+    50, 62
+  );
+
+  // ── Summary Cards ──
+  const cardY = 100;
+  const cardW = 120;
+  const cardH = 55;
+  const cardGap = 12;
+  const cards = [
+    { label: 'INCOME', value: `$${summary.total_income.toFixed(2)}`, color: GREEN },
+    { label: 'EXPENSES', value: `$${summary.total_expenses.toFixed(2)}`, color: RED },
+    { label: 'NET', value: `${summary.net >= 0 ? '+' : ''}$${summary.net.toFixed(2)}`, color: summary.net >= 0 ? GREEN : RED },
+    { label: 'DOCUMENTS', value: String(summary.doc_count), color: ORANGE },
+  ];
+
+  cards.forEach((card, i) => {
+    const x = 50 + i * (cardW + cardGap);
+    doc.roundedRect(x, cardY, cardW, cardH, 4).fill(LIGHT_BG);
+    doc.fontSize(15).fill(card.color).text(card.value, x, cardY + 10, { width: cardW, align: 'center' });
+    doc.fontSize(7).fill(GRAY).text(card.label, x, cardY + 32, { width: cardW, align: 'center' });
+  });
+
+  // ── Table ──
+  const tableTop = cardY + cardH + 25;
+  const colWidths = [68, 160, 55, 55, 55, 80, 55];
+  const colHeaders = ['Date', 'Vendor', 'Amount', 'Type', 'Dir.', 'Owner', 'Tags'];
+  const tableLeft = 50;
+  const rowHeight = 18;
+
+  // Table header
+  doc.rect(tableLeft, tableTop, colWidths.reduce((a, b) => a + b, 0), rowHeight).fill(DARK);
+  let hx = tableLeft;
+  colHeaders.forEach((h, i) => {
+    doc.fontSize(7.5).fill(WHITE).text(h, hx + 4, tableTop + 5, { width: colWidths[i] - 8 });
+    hx += colWidths[i];
+  });
+
+  // Table rows
+  let y = tableTop + rowHeight;
+  const maxY = doc.page.height - 60; // leave room for footer
+
+  rows.forEach((row, idx) => {
+    if (y + rowHeight > maxY) {
+      doc.addPage();
+      y = 50;
+      // Repeat header on new page
+      doc.rect(tableLeft, y, colWidths.reduce((a, b) => a + b, 0), rowHeight).fill(DARK);
+      let hx2 = tableLeft;
+      colHeaders.forEach((h, i) => {
+        doc.fontSize(7.5).fill(WHITE).text(h, hx2 + 4, y + 5, { width: colWidths[i] - 8 });
+        hx2 += colWidths[i];
+      });
+      y += rowHeight;
+    }
+
+    // Alternating row background
+    if (idx % 2 === 0) {
+      doc.rect(tableLeft, y, colWidths.reduce((a, b) => a + b, 0), rowHeight).fill(LIGHT_BG);
+    }
+
+    const tags = tagStmt.all(row.id).map(t => t.name).join(', ');
+    const owners = ownerStmt.all(row.id).map(o => o.name).join(', ');
+    const amountColor = row.direction === 'Income' ? GREEN : DARK;
+
+    const cells = [
+      row.document_date || '',
+      row.vendor || row.title || '',
+      row.amount != null ? '$' + Number(row.amount).toFixed(2) : '',
+      row.type_name || '',
+      row.direction || '',
+      owners,
+      tags.length > 20 ? tags.substring(0, 18) + '..' : tags,
+    ];
+
+    let cx = tableLeft;
+    cells.forEach((cell, i) => {
+      const color = (i === 2) ? amountColor : DARK;
+      doc.fontSize(7).fill(color).text(cell, cx + 4, y + 5, {
+        width: colWidths[i] - 8,
+        ellipsis: true,
+        height: rowHeight - 4,
+        lineBreak: false,
+      });
+      cx += colWidths[i];
+    });
+
+    y += rowHeight;
+  });
+
+  // ── Footer ──
+  const pageCount = doc.bufferedPageRange().count;
+  for (let i = 0; i < pageCount; i++) {
+    doc.switchToPage(i);
+    doc.fontSize(7).fill(GRAY).text(
+      `Genizah · Page ${i + 1} of ${pageCount}`,
+      50, doc.page.height - 35,
+      { width: doc.page.width - 100, align: 'center' }
+    );
+  }
+
+  doc.end();
 }));
 
 module.exports = router;

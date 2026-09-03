@@ -132,3 +132,4 @@ export async function getReportByDayOfWeek(params) { return apiFetch(`/reports/b
 export async function getReportTrend(params) { return apiFetch(`/reports/trend?${reportQuery(params)}`); }
 export function getReportCsvUrl(params) { return `${API_BASE}/reports/export/csv?${reportQuery(params)}&token=${getToken()}`; }
 export async function getReportExpiring(days = 90) { return apiFetch(`/reports/expiring?days=${days}`); }
+export function getReportPdfUrl(params) { return `${API_BASE}/reports/export/pdf?${reportQuery(params)}&token=${getToken()}`; }
